@@ -2,10 +2,10 @@
 // Vercel serverless function for Gemini 2.0 Flash
 // Env var required: GOOGLE_API_KEY (set in Vercel → Project → Settings → Environment Variables)
 
-// (volitelné) zafixuj runtime
+// optional: pin runtime
 export const config = { runtime: 'nodejs18.x' };
 
-// permissive CORS – povol vše (snadné pro první rozběhnutí)
+// permissive CORS for initial bring-up (you can tighten later)
 function setCors(res, origin = '*') {
   res.setHeader('Access-Control-Allow-Origin', origin || '*');
   res.setHeader('Vary', 'Origin');
@@ -23,7 +23,7 @@ export default async function handler(req, res) {
       return res.status(204).end();
     }
 
-    // GET → nepadat, jen informace (pomáhá ladit bez 500)
+    // GET → simple info (avoid 500 on direct visit)
     if (req.method !== 'POST') {
       setCors(res, origin);
       return res.status(200).json({ error: 'Use POST', ok: true });
@@ -37,7 +37,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Missing GOOGLE_API_KEY' });
     }
 
-    // robustní načtení těla
+    // robust body parse
     let body = req.body;
     if (typeof body === 'string') {
       try { body = JSON.parse(body); } catch { /* ignore */ }
@@ -51,7 +51,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Missing "context" string' });
     }
 
-    // limit vstupu kvůli latenci/ceně
+    // limit input for latency/cost
     const MAX_INPUT = 9000;
     const ctx = context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
 
@@ -65,7 +65,7 @@ export default async function handler(req, res) {
 
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
 
-    const r = await fetch(`${url}?key=${apiKey}`, {
+    const r = await fetch(`${url}?key=${process.env.GOOGLE_API_KEY}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -79,7 +79,7 @@ export default async function handler(req, res) {
 
     if (!r.ok) {
       const details = await r.text().catch(() => '');
-      console.error('[hints] Gemini error:', r.status, details?.slice?.(0,200));
+      console.error('[hints] Gemini error:', r.status, details?.slice?.(0, 200));
       return res.status(r.status).json({ error: 'Gemini error', details });
     }
 
