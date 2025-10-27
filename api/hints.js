@@ -5,7 +5,7 @@
 // --- CORS: povolené originy (uprav podle sebe) ---
 const ALLOWED_ORIGINS = [
   'https://krkr.webflow.io', // ← Webflow publish URL
-  'https://wiki-game-inky.vercel.app/api/hints, // ← Vercel URL
+  'https://wiki-game-inky.vercel.app, // ← Vercel URL
   'https://www.TVUJ-DOMENA.cz',      // ← tvoje vlastní doména (pokud používáš)
   'http://localhost:3000'            // ← nech pro lokální testování; v produkci klidně smaž
 ];
