@@ -2,14 +2,42 @@
 // Vercel serverless function for Gemini 2.0 Flash
 // Env var required: GOOGLE_API_KEY (set in Vercel → Project → Settings → Environment Variables)
 
-export default async function handler(req, res) {
-  // --- CORS (loose for dev; tighten to your domains later) ---
-  const origin = req.headers.origin || '*';
-  res.setHeader('Access-Control-Allow-Origin', origin);
+// --- CORS: povolené originy (uprav podle sebe) ---
+const ALLOWED_ORIGINS = [
+  'https://TVUJ-PROJEKT.webflow.io', // ← Webflow publish URL
+  'https://www.TVUJ-DOMENA.cz',      // ← tvoje vlastní doména (pokud používáš)
+  'http://localhost:3000'            // ← nech pro lokální testování; v produkci klidně smaž
+];
+
+const isAllowedOrigin = (origin = '') => ALLOWED_ORIGINS.includes(origin);
+
+function applyCors(res, origin, allow = false) {
   res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (allow) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  }
+}
+
+export default async function handler(req, res) {
+  const origin = req.headers.origin || '';
+  const allowed = isAllowedOrigin(origin);
+
+  // Preflight
+  if (req.method === 'OPTIONS') {
+    if (allowed) applyCors(res, origin, true);
+    return res.status(204).end();
+  }
+
+  // Nepovolený origin
+  if (!allowed) {
+    applyCors(res, origin, false);
+    return res.status(403).json({ error: 'Forbidden origin' });
+  }
+
+  // CORS pro povolené požadavky
+  applyCors(res, origin, true);
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Use POST' });
@@ -19,7 +47,13 @@ export default async function handler(req, res) {
     const apiKey = process.env.GOOGLE_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'Missing GOOGLE_API_KEY' });
 
-    const { context } = req.body || {};
+    // Vercel většinou req.body parsuje; když přijde string, zkusíme JSON.parse
+    let body = req.body;
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch (_) {}
+    }
+
+    const { context } = body || {};
     if (!context || typeof context !== 'string') {
       return res.status(400).json({ error: 'Missing "context" string' });
     }
@@ -32,7 +66,8 @@ export default async function handler(req, res) {
 - Odpovídej česky.
 - Vrať 5–6 velmi krátkých otázek (max ~90 znaků), každou na novém řádku.
 - Zviditelni pojmy, data, místa, jména. Žádné vysvětlování, žádné číslování.
-– Za otázku dej tečku. A za ni napiš Odpověď: a sem dej správnou odpověď`;
+- Za otázku dej tečku. A za ni napiš "Odpověď:" a uveď stručnou správnou odpověď.`;
+
     const user = `Text článku (zkrácený):\n"""${ctx}"""\n\nVrať pouze otázky s odpovědí, každou na novém řádku.`;
 
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
