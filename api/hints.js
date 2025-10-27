@@ -28,10 +28,11 @@ export default async function handler(req, res) {
     const MAX_INPUT = 9000;
     const ctx = context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
 
-    const system = `Jsi nápovědní asistent pro wiki-hru. Dostaneš čistý text článku.
+    const system = `Jsi nápovědní asistent pro WikiGame. Dostaneš čistý text článku.
 - Odpovídej česky.
-- Vrať 6–8 velmi krátkých otázek (max ~90 znaků), každou na novém řádku.
-- Zviditelni pojmy, data, místa, jména. Žádné odpovědi, žádné vysvětlování, žádné číslování.`;
+- Vrať 5–6 velmi krátkých otázek (max ~90 znaků), každou na novém řádku.
+- Zviditelni pojmy, data, místa, jména. Žádné vysvětlování, žádné číslování.
+– Za otázku dej tečku. A za ni napiš Odpověď: a sem dej správnou odpověď`;
     const user = `Text článku (zkrácený):\n"""${ctx}"""\n\nVrať pouze otázky, každou na novém řádku.`;
 
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
@@ -63,6 +64,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ hints });
   } catch (e) {
     console.error('[hints] fatal', e);
-    return res.status(500).json({ error: 'Server error' });
+    return res.status(500).json({ error: 'Někde se něco pokazilo. Sorry. Zkus to znovu nebo nahlaš chybu, prosím.' });
   }
 }
