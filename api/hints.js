@@ -2,12 +2,6 @@
 // Vercel serverless function for Gemini 2.0 Flash
 // Env var required: GOOGLE_API_KEY (set in Vercel → Project → Settings → Environment Variables)
 
-// --- CORS: povolené originy (uprav podle sebe) ---
-const ALLOWED_ORIGINS = [
-  'https://krkr.webflow.io', // ← Webflow publish URL
-  'https://wiki-game-inky.vercel.app, // ← Vercel URL
-  'https://www.TVUJ-DOMENA.cz',      // ← tvoje vlastní doména (pokud používáš)
-  'http://localhost:3000'            // ← nech pro lokální testování; v produkci klidně smaž
 ];
 
 const isAllowedOrigin = (origin = '') => ALLOWED_ORIGINS.includes(origin);
