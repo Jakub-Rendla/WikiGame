@@ -1,4 +1,3 @@
-<script>
 // api/hints.js
 // Vercel serverless function for Gemini 2.0 Flash
 // Env var required: GOOGLE_API_KEY (set in Vercel → Project → Settings → Environment Variables)
@@ -68,4 +67,3 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Někde se něco pokazilo. Sorry. Zkus to znovu nebo nahlaš chybu, prosím.' });
   }
 }
-</script>
