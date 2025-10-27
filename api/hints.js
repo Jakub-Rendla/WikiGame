@@ -2,50 +2,48 @@
 // Vercel serverless function for Gemini 2.0 Flash
 // Env var required: GOOGLE_API_KEY (set in Vercel → Project → Settings → Environment Variables)
 
-];
+// (volitelné) zafixuj runtime
+export const config = { runtime: 'nodejs18.x' };
 
-const isAllowedOrigin = (origin = '') => ALLOWED_ORIGINS.includes(origin);
-
-function applyCors(res, origin, allow = false) {
+// permissive CORS – povol vše (snadné pro první rozběhnutí)
+function setCors(res, origin = '*') {
+  res.setHeader('Access-Control-Allow-Origin', origin || '*');
   res.setHeader('Vary', 'Origin');
-  if (allow) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  }
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
 export default async function handler(req, res) {
-  const origin = req.headers.origin || '';
-  const allowed = isAllowedOrigin(origin);
-
-  // Preflight
-  if (req.method === 'OPTIONS') {
-    if (allowed) applyCors(res, origin, true);
-    return res.status(204).end();
-  }
-
-  // Nepovolený origin
-  if (!allowed) {
-    applyCors(res, origin, false);
-    return res.status(403).json({ error: 'Forbidden origin' });
-  }
-
-  // CORS pro povolené požadavky
-  applyCors(res, origin, true);
-
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Use POST' });
-  }
-
   try {
-    const apiKey = process.env.GOOGLE_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'Missing GOOGLE_API_KEY' });
+    const origin = req.headers?.origin || '*';
 
-    // Vercel většinou req.body parsuje; když přijde string, zkusíme JSON.parse
+    // Preflight
+    if (req.method === 'OPTIONS') {
+      setCors(res, origin);
+      return res.status(204).end();
+    }
+
+    // GET → nepadat, jen informace (pomáhá ladit bez 500)
+    if (req.method !== 'POST') {
+      setCors(res, origin);
+      return res.status(200).json({ error: 'Use POST', ok: true });
+    }
+
+    setCors(res, origin);
+
+    const apiKey = process.env.GOOGLE_API_KEY;
+    if (!apiKey) {
+      console.error('[hints] Missing GOOGLE_API_KEY');
+      return res.status(500).json({ error: 'Missing GOOGLE_API_KEY' });
+    }
+
+    // robustní načtení těla
     let body = req.body;
     if (typeof body === 'string') {
-      try { body = JSON.parse(body); } catch (_) {}
+      try { body = JSON.parse(body); } catch { /* ignore */ }
+    }
+    if (!body || typeof body !== 'object') {
+      return res.status(400).json({ error: 'Invalid JSON body' });
     }
 
     const { context } = body || {};
@@ -53,7 +51,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Missing "context" string' });
     }
 
-    // keep input small → fast & cheap
+    // limit vstupu kvůli latenci/ceně
     const MAX_INPUT = 9000;
     const ctx = context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
 
@@ -80,11 +78,16 @@ export default async function handler(req, res) {
     });
 
     if (!r.ok) {
-      const errText = await r.text().catch(() => '');
-      return res.status(r.status).json({ error: 'Gemini error', details: errText });
+      const details = await r.text().catch(() => '');
+      console.error('[hints] Gemini error:', r.status, details?.slice?.(0,200));
+      return res.status(r.status).json({ error: 'Gemini error', details });
     }
 
-    const data = await r.json();
+    const data = await r.json().catch(e => {
+      console.error('[hints] JSON parse error:', e);
+      return null;
+    });
+
     const text =
       data?.candidates?.[0]?.content?.parts?.map(p => p.text).join('')?.trim() ||
       data?.candidates?.[0]?.content?.parts?.[0]?.text ||
