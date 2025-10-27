@@ -33,7 +33,7 @@ export default async function handler(req, res) {
 - Vrať 5–6 velmi krátkých otázek (max ~90 znaků), každou na novém řádku.
 - Zviditelni pojmy, data, místa, jména. Žádné vysvětlování, žádné číslování.
 – Za otázku dej tečku. A za ni napiš Odpověď: a sem dej správnou odpověď`;
-    const user = `Text článku (zkrácený):\n"""${ctx}"""\n\nVrať pouze otázky, každou na novém řádku.`;
+    const user = `Text článku (zkrácený):\n"""${ctx}"""\n\nVrať pouze otázky s odpovědí, každou na novém řádku.`;
 
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
 
