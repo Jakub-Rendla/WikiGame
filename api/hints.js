@@ -3,7 +3,7 @@
 // Env var required: GOOGLE_API_KEY (set in Vercel → Project → Settings → Environment Variables)
 
 // optional: pin runtime
-export const config = { runtime: 'nodejs18.x' };
+export const config = { runtime: 'nodejs' };
 
 // permissive CORS for initial bring-up (you can tighten later)
 function setCors(res, origin = '*') {
