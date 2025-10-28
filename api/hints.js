@@ -58,9 +58,9 @@ export default async function handler(req, res) {
     const system = `Jsi nápovědní asistent pro WikiGame. Dostaneš čistý text článku.
 - Odpovídej česky.
 - Vrať 5–6 velmi krátkých otázek (max ~90 znaků), každou na novém řádku.
-- Zaměř se na důležité pojmy, jména, data, události nebo místa.
+- Zaměř se na důležité pojmy, jména, data, události, místa, osobnosti, sporty, hudební nástroje, lidé a podobně.
 - Nepoužívej zvýraznění, formátování ani číslování.
-- Každá otázka končí tečkou. Za ní napiš "Odpověď:" a krátkou správnou odpověď.`;
+- Za otázku napiš "Odpověď:" a správnou odpověď.`;
 
     const user = `Text článku (zkrácený):\n"""${ctx}"""\n\nVrať pouze otázky s odpovědí, každou na novém řádku.`;
 
