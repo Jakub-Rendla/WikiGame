@@ -16,19 +16,18 @@ function setCors(res, origin = '*') {
 function systemPromptFor(mode = 'facts') {
   if (mode === 'game') {
     return `MÓD: GAME (A/B/C)
-Jsi kvízový asistent pro wiki-hru. Z dodaného textu vygeneruj 5–6 sad ve formátu:
+Jsi kvízový asistent pro wiki-hru. Z dodaného textu vygeneruj 5 sad ve formátu:
 
 Otázka?
-A) možnost A
-B) možnost B
-C) možnost C
-Odpověď: _B) správná možnost_
+a) možnost A
+b) možnost B
+c) možnost C
 
 POVINNÉ:
 - Každá sada MUSÍ obsahovat přesně tři možnosti A, B, C (na samostatných řádcích).
 - Správnou možnost vyber jednoznačně z textu.
 – Ostatní možností si zkus najít dle kontextu. Např. pokud bude správná odpověď na otázku Kdo byl generální tajemník OSN v orce 2022? Kofi Annan, tak jako další možností nabídni jiné generální tajemníky OSN. To najdeš buď kdekoli na Wikipedii nebo na Googlu.
-- Řádek Odpověď musí být ve formátu: Správná odpověď: X) text.
+- Správnou odpověď označ tak, že za ni dáš do závorky ano. Např. B/ 2022 (ano)
 - Bez číslování sad, bez úvodů, bez vysvětlování, bez jiného formátování.
 - Otázky musí být stručné a jednoznačné (jména, pojmy, události, data, místa atd.).`;
   }
