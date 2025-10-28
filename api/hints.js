@@ -1,10 +1,10 @@
 // api/hints.js
 // Vercel serverless function for Gemini 2.0 Flash
-// Env var required: GOOGLE_API_KEY (set in Vercel → Project → Settings → Environment Variables)
+// Env var required: GOOGLE_API_KEY (Vercel → Project → Settings → Environment Variables)
 
 export const config = { runtime: 'nodejs' };
 
-// permissive CORS for now (tighten later if needed)
+// Permissive CORS (můžeš později zpřísnit)
 function setCors(res, origin = '*') {
   res.setHeader('Access-Control-Allow-Origin', origin || '*');
   res.setHeader('Vary', 'Origin');
@@ -12,25 +12,35 @@ function setCors(res, origin = '*') {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
+// Jasně odlišné prompty pro "facts" vs "game"
 function systemPromptFor(mode = 'facts') {
   if (mode === 'game') {
-    // Hravý, ale doménově obecný – funguje pro jakýkoli článek (ne jen film)
-    return `Jsi hravý kvízový asistent pro wiki-hru. Dostaneš text článku.
-- Odpovídej česky.
-- Ke KAŽDÉ otázce přidej 3 možnosti (A, B, C) na samostatných řádcích.
-- Pod možnosti napiš řádek "Odpověď: správná možnost" a text správné možnosti označ pomocí ano v závorce za ní (např. B) Paříž (ano)).
-- Vytvářej stručné, jednoznačné otázky z klíčových faktů: jména, pojmy, události, data, místa apod.
-- Bez číslování, bez tučného písma, bez dalších komentářů.
-- Vrať 6–7 sad (otázka + A/B/C + Odpověď).`;
+    return `MÓD: GAME (A/B/C)
+Jsi kvízový asistent pro wiki-hru. Z dodaného textu vygeneruj 5–6 sad ve formátu:
+
+Otázka?
+A) možnost A
+B) možnost B
+C) možnost C
+Odpověď: _B) správná možnost_
+
+POVINNÉ:
+- Každá sada MUSÍ obsahovat přesně tři možnosti A, B, C (na samostatných řádcích).
+- Správnou možnost vyber jednoznačně z textu.
+- Řádek Odpověď musí být ve formátu: Odpověď: _X) text_ (použij podtržítka okolo celé správné možnosti).
+- Bez číslování sad, bez úvodů, bez vysvětlování, bez jiného formátování.
+- Otázky musí být stručné a jednoznačné (jména, pojmy, události, data, místa atd.).`;
   }
 
-  // FACTS – výchozí styl, krátké Q/A na jednom řádku
-  return `Jsi nápovědní asistent pro wiki-hru. Dostaneš čistý text článku.
-- Odpovídej česky.
-- Vrať 6–7 velmi krátkých otázek (max ~90 znaků), každou na novém řádku.
-- Zaměř se na důležité pojmy, jména, data, události nebo místa.
-- Nepoužívej formátování ani číslování.
-- Za otázku napiš " Odpověď: " a stručnou správnou odpověď na stejný řádek.`;
+  // FACTS (výchozí) – otázka + odpověď na jednom řádku
+  return `MÓD: FACTS (Q/A na jednom řádku)
+Jsi nápovědní asistent pro wiki-hru. Z dodaného textu vygeneruj 5–6 řádků, každý přesně ve formátu:
+Otázka? Odpověď: krátká správná odpověď
+
+POVINNÉ:
+- Každá otázka a odpověď jsou na JEDNOM řádku.
+- Žádné číslování, žádné zvýrazňování, žádné doplňující věty.
+- Otázky stručné a faktické (pojmy, jména, data, místa, události).`;
 }
 
 export default async function handler(req, res) {
@@ -43,7 +53,7 @@ export default async function handler(req, res) {
       return res.status(204).end();
     }
 
-    // GET → informační odpověď
+    // GET → info (ať to nepadá při otevření v prohlížeči)
     if (req.method !== 'POST') {
       setCors(res, origin);
       return res.status(200).json({ error: 'Use POST', ok: true });
@@ -60,7 +70,7 @@ export default async function handler(req, res) {
     // robust body parse
     let body = req.body;
     if (typeof body === 'string') {
-      try { body = JSON.parse(body); } catch { /* ignore */ }
+      try { body = JSON.parse(body); } catch {}
     }
     if (!body || typeof body !== 'object') {
       return res.status(400).json({ error: 'Invalid JSON body' });
@@ -72,7 +82,7 @@ export default async function handler(req, res) {
     }
     const safeMode = (mode === 'game' || mode === 'facts') ? mode : 'facts';
 
-    // limit input for latency/cost
+    // limit input (rychlost/náklady)
     const MAX_INPUT = 9000;
     const ctx = context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
 
