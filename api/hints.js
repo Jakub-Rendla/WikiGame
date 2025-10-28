@@ -2,15 +2,35 @@
 // Vercel serverless function for Gemini 2.0 Flash
 // Env var required: GOOGLE_API_KEY (set in Vercel → Project → Settings → Environment Variables)
 
-// optional: pin runtime
 export const config = { runtime: 'nodejs' };
 
-// permissive CORS for initial bring-up (you can tighten later)
+// permissive CORS for now (tighten later if needed)
 function setCors(res, origin = '*') {
   res.setHeader('Access-Control-Allow-Origin', origin || '*');
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
+function systemPromptFor(mode = 'facts') {
+  if (mode === 'game') {
+    // Hravý, ale doménově obecný – funguje pro jakýkoli článek (ne jen film)
+    return `Jsi hravý kvízový asistent pro wiki-hru. Dostaneš text článku.
+- Odpovídej česky.
+- Ke KAŽDÉ otázce přidej 3 možnosti (A, B, C) na samostatných řádcích.
+- Pod možnosti napiš řádek "Odpověď: správná možnost" a text správné možnosti označ pomocí ano v závorce za ní (např. B) Paříž (ano)).
+- Vytvářej stručné, jednoznačné otázky z klíčových faktů: jména, pojmy, události, data, místa apod.
+- Bez číslování, bez tučného písma, bez dalších komentářů.
+- Vrať 6–7 sad (otázka + A/B/C + Odpověď).`;
+  }
+
+  // FACTS – výchozí styl, krátké Q/A na jednom řádku
+  return `Jsi nápovědní asistent pro wiki-hru. Dostaneš čistý text článku.
+- Odpovídej česky.
+- Vrať 6–7 velmi krátkých otázek (max ~90 znaků), každou na novém řádku.
+- Zaměř se na důležité pojmy, jména, data, události nebo místa.
+- Nepoužívej formátování ani číslování.
+- Za otázku napiš " Odpověď: " a stručnou správnou odpověď na stejný řádek.`;
 }
 
 export default async function handler(req, res) {
@@ -23,7 +43,7 @@ export default async function handler(req, res) {
       return res.status(204).end();
     }
 
-    // GET → simple info (avoid 500 on direct visit)
+    // GET → informační odpověď
     if (req.method !== 'POST') {
       setCors(res, origin);
       return res.status(200).json({ error: 'Use POST', ok: true });
@@ -46,27 +66,22 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Invalid JSON body' });
     }
 
-    const { context } = body || {};
+    const { context, mode } = body || {};
     if (!context || typeof context !== 'string') {
       return res.status(400).json({ error: 'Missing "context" string' });
     }
+    const safeMode = (mode === 'game' || mode === 'facts') ? mode : 'facts';
 
     // limit input for latency/cost
     const MAX_INPUT = 9000;
     const ctx = context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
 
-    const system = `Jsi nápovědní asistent pro WikiGame. Dostaneš čistý text článku.
-- Odpovídej česky.
-- Vrať 5–6 velmi krátkých otázek (max ~90 znaků), každou na novém řádku.
-- Zaměř se na důležité pojmy, jména, data, události, místa, osobnosti, sporty, hudební nástroje, lidé a podobně.
-- Nepoužívej zvýraznění, formátování ani číslování.
-- Za otázku napiš "Odpověď:" a správnou odpověď.`;
-
-    const user = `Text článku (zkrácený):\n"""${ctx}"""\n\nVrať pouze otázky s odpovědí, každou na novém řádku.`;
+    const system = systemPromptFor(safeMode);
+    const user = `Zkrácený text článku:\n"""${ctx}"""\n\nVrať výstup přesně podle instrukcí výše pro mód: ${safeMode}.`;
 
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
 
-    const r = await fetch(`${url}?key=${process.env.GOOGLE_API_KEY}`, {
+    const r = await fetch(`${url}?key=${apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -74,13 +89,13 @@ export default async function handler(req, res) {
           { role: 'user', parts: [{ text: system }] },
           { role: 'user', parts: [{ text: user }] }
         ],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 300 }
+        generationConfig: { temperature: 0.7, maxOutputTokens: 340 }
       })
     });
 
     if (!r.ok) {
       const details = await r.text().catch(() => '');
-      console.error('[hints] Gemini error:', r.status, details?.slice?.(0, 200));
+      console.error('[hints] Gemini error:', r.status, details?.slice?.(0, 300));
       return res.status(r.status).json({ error: 'Gemini error', details });
     }
 
@@ -95,7 +110,7 @@ export default async function handler(req, res) {
       '';
 
     const hints = (text || '').replace(/\r\n/g, '\n').trim();
-    return res.status(200).json({ hints });
+    return res.status(200).json({ hints, mode: safeMode });
   } catch (e) {
     console.error('[hints] fatal', e);
     return res.status(500).json({ error: 'Někde se něco pokazilo. Sorry. Zkus to znovu nebo nahlaš chybu, prosím.' });
