@@ -27,6 +27,7 @@ Odpověď: _B) správná možnost_
 POVINNÉ:
 - Každá sada MUSÍ obsahovat přesně tři možnosti A, B, C (na samostatných řádcích).
 - Správnou možnost vyber jednoznačně z textu.
+– Ostatní možností si zkus najít dle kontextu. Např. pokud bude správná odpověď na otázku Kdo byl generální tajemník OSN v orce 2022? Kofi Annan, tak jako další možností nabídni jiné generální tajemníky OSN. To najdeš buď kdekoli na Wikipedii nebo na Googlu.
 - Řádek Odpověď musí být ve formátu: Odpověď: _X) text_ (použij podtržítka okolo celé správné možnosti).
 - Bez číslování sad, bez úvodů, bez vysvětlování, bez jiného formátování.
 - Otázky musí být stručné a jednoznačné (jména, pojmy, události, data, místa atd.).`;
