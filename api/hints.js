@@ -1,22 +1,34 @@
 // api/hints.js
 // Vercel serverless function for Gemini 2.0 Flash
-// Env var required: GOOGLE_API_KEY (Vercel → Project → Settings → Environment Variables)
 
 export const config = { runtime: 'nodejs' };
 
-// Permissive CORS (můžeš později zpřísnit)
-function setCors(res, origin = '*') {
-  res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+// ---------------------------------------------
+// CORS
+// ---------------------------------------------
+function setCors(res, origin = "*") {
+  res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-// Jasně odlišné prompty pro "facts" vs "game"
-function systemPromptFor(mode = 'facts') {
-  if (mode === 'game') {
-    return `MÓD: GAME (A/B/C)
-Jsi kvízový asistent pro wiki-hru. Z dodaného textu vygeneruj 5 sad ve formátu:
+// ---------------------------------------------
+// STRICT PROMPTS – Czech + English
+// ---------------------------------------------
+// 20 lines total (5 sets * 4 lines)
+// Each question:
+// Q?
+// a) ...
+// b) ...
+// c) ... (ano)
+
+function strictPromptCS() {
+  return `
+MÓD: WIKI-GAME STRICT (CS)
+
+Vygeneruj přesně 5 sad otázek z dodaného textu. 
+Každá sada obsahuje přesně 4 řádky v tomto formátu:
 
 Otázka?
 a) možnost A
@@ -24,105 +36,162 @@ b) možnost B
 c) možnost C
 
 POVINNÉ:
-- Každá sada MUSÍ obsahovat přesně tři možnosti A, B, C (na samostatných řádcích).
-- Správnou možnost vyber jednoznačně z textu.
-– Ostatní možností si zkus najít dle kontextu. Např. pokud bude správná odpověď na otázku Kdo byl generální tajemník OSN v orce 2022? Kofi Annan, tak jako další možností nabídni jiné generální tajemníky OSN. To najdeš buď kdekoli na Wikipedii nebo na Googlu.
-- Správnou odpověď označ tak, že za ni dáš do závorky ano. Např. B/ 2022 (ano)
-- Bez číslování sad, bez úvodů, bez vysvětlování, bez jiného formátování.
-- Otázky musí být stručné a jednoznačné (jména, pojmy, události, data, místa atd.).`;
-  }
+1) Otázky piš výhradně podle dodaného textu. NEVYMÝŠLEJ fakta, která nejsou uvedena.
+2) Označ přesně jednu odpověď pomocí "(ano)".
+3) Správná odpověď MUSÍ pocházet z článku.
+4) Distraktory MUSÍ být realistické a související s tématem (žádné nesmysly).
+5) Přesný formát, žádné číslování, žádné odrážky, žádné jiné řádky.
+6) Bez úvodu, komentářů nebo vysvětlování.
+7) Výstup = přesně 20 řádků.
 
-  // FACTS (výchozí) – otázka + odpověď na jednom řádku
-  return `MÓD: FACTS (Q/A na jednom řádku)
-Jsi nápovědní asistent pro wiki-hru. Z dodaného textu vygeneruj 5–6 řádků, každý přesně ve formátu:
-Otázka? Odpověď: krátká správná odpověď
+PŘÍKLAD DOBŘE:
+Kdy začala první světová válka?
+a) 1914 (ano)
+b) 1939
+c) 1905
 
-POVINNÉ:
-- Každá otázka a odpověď jsou na JEDNOM řádku.
-- Žádné číslování, žádné zvýrazňování, žádné doplňující věty.
-- Otázky stručné a faktické (pojmy, jména, data, místa, události).`;
+ŠPATNĚ:
+1) Kdy začala... (NE)
+A: 1914 ✓ (NE)
+Odpověď: 1914 (NE)
+`;
 }
 
+function strictPromptEN() {
+  return `
+MODE: WIKI-GAME STRICT (EN)
+
+Generate exactly 5 question sets from the provided text.
+Each set must have exactly 4 lines:
+
+Question?
+a) option A
+b) option B
+c) option C
+
+REQUIREMENTS:
+1) Base all questions ONLY on the provided article. DO NOT INVENT facts not present there.
+2) Mark exactly one correct option with "(yes)".
+3) The correct answer MUST be directly supported by the article.
+4) Distractors must be realistic and related to the topic.
+5) Strict format, no numbering, no bullets, no extra text.
+6) No explanations, no introductions, no commentary.
+7) Output = exactly 20 lines.
+
+GOOD EXAMPLE:
+When did World War II end?
+a) 1945 (yes)
+b) 1939
+c) 1951
+
+BAD EXAMPLE:
+1) When did WW2 end? (NO)
+Answer: 1945 (NO)
+`;
+}
+
+// ---------------------------------------------
+// CHOOSE PROMPT BASED ON lang = 'cs' or 'en'
+// ---------------------------------------------
+function getStrictPrompt(lang) {
+  return lang === "en" ? strictPromptEN() : strictPromptCS();
+}
+
+// ---------------------------------------------
+// MAIN HANDLER
+// ---------------------------------------------
 export default async function handler(req, res) {
   try {
-    const origin = req.headers?.origin || '*';
+    const origin = req.headers?.origin || "*";
 
-    // Preflight
-    if (req.method === 'OPTIONS') {
+    if (req.method === "OPTIONS") {
       setCors(res, origin);
       return res.status(204).end();
     }
 
-    // GET → info (ať to nepadá při otevření v prohlížeči)
-    if (req.method !== 'POST') {
+    if (req.method !== "POST") {
       setCors(res, origin);
-      return res.status(200).json({ error: 'Use POST', ok: true });
+      return res.status(200).json({ ok: true, error: "Use POST" });
     }
 
     setCors(res, origin);
 
-    const apiKey = process.env.GOOGLE_API_KEY;
-    if (!apiKey) {
-      console.error('[hints] Missing GOOGLE_API_KEY');
-      return res.status(500).json({ error: 'Missing GOOGLE_API_KEY' });
-    }
-
-    // robust body parse
+    // -------------------------------------
+    // PARSE BODY
+    // -------------------------------------
     let body = req.body;
-    if (typeof body === 'string') {
+    if (typeof body === "string") {
       try { body = JSON.parse(body); } catch {}
     }
-    if (!body || typeof body !== 'object') {
-      return res.status(400).json({ error: 'Invalid JSON body' });
+
+    const { context, mode, lang } = body || {};
+
+    if (!context || typeof context !== "string") {
+      return res.status(400).json({ error: 'Missing "context"' });
     }
 
-    const { context, mode } = body || {};
-    if (!context || typeof context !== 'string') {
-      return res.status(400).json({ error: 'Missing "context" string' });
-    }
-    const safeMode = (mode === 'game' || mode === 'facts') ? mode : 'facts';
+    const safeLang = (lang === "en" || lang === "cs") ? lang : "cs";
+    const safeMode = mode === "game" ? "game" : "facts";
 
-    // limit input (rychlost/náklady)
+    // -------------------------------------
+    // PREPARE PROMPTS
+    // -------------------------------------
+    const system = safeMode === "game"
+      ? getStrictPrompt(safeLang)
+      : "You are a fact assistant. Answer concisely.";
+
     const MAX_INPUT = 9000;
     const ctx = context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
 
-    const system = systemPromptFor(safeMode);
-    const user = `Zkrácený text článku:\n"""${ctx}"""\n\nVrať výstup přesně podle instrukcí výše pro mód: ${safeMode}.`;
+    const user = `Zkrácený text článku / Source article text:\n"""${ctx}"""\n\nVrať výstup přesně podle instrukcí. Language: ${safeLang}.`;
 
-    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+    // -------------------------------------
+    // CALL GEMINI 2.0 FLASH
+    // -------------------------------------
+    const apiKey = process.env.GOOGLE_API_KEY;
+    const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
 
     const r = await fetch(`${url}?key=${apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [
-          { role: 'user', parts: [{ text: system }] },
-          { role: 'user', parts: [{ text: user }] }
+          { role: "user", parts: [{ text: system }]},
+          { role: "user", parts: [{ text: user }]}
         ],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 340 }
+        generationConfig: {
+          temperature: 0.6,
+          maxOutputTokens: 340
+        }
       })
     });
 
     if (!r.ok) {
-      const details = await r.text().catch(() => '');
-      console.error('[hints] Gemini error:', r.status, details?.slice?.(0, 300));
-      return res.status(r.status).json({ error: 'Gemini error', details });
+      const t = await r.text().catch(() => "");
+      console.error("[hints] Gemini error:", r.status, t);
+      return res.status(r.status).json({ error: "Gemini error", details: t });
     }
 
-    const data = await r.json().catch(e => {
-      console.error('[hints] JSON parse error:', e);
-      return null;
+    const data = await r.json().catch(e => null);
+    const text =
+      data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("")?.trim() ||
+      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "";
+
+    const hints = (text || "").trim();
+
+    return res.status(200).json({
+      ok: true,
+      mode: safeMode,
+      lang: safeLang,
+      hints
     });
 
-    const text =
-      data?.candidates?.[0]?.content?.parts?.map(p => p.text).join('')?.trim() ||
-      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      '';
-
-    const hints = (text || '').replace(/\r\n/g, '\n').trim();
-    return res.status(200).json({ hints, mode: safeMode });
-  } catch (e) {
-    console.error('[hints] fatal', e);
-    return res.status(500).json({ error: 'Někde se něco pokazilo. Sorry. Zkus to znovu nebo nahlaš chybu, prosím.' });
+  } catch (err) {
+    console.error("[hints] fatal", err);
+    return res.status(500).json({
+      error: "Server error",
+      details: err.toString()
+    });
   }
 }
