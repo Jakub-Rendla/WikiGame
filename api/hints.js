@@ -1,10 +1,9 @@
-// api/hints.js — Gemini 2.0 Flash strict prompt (CS/EN), 3 otázkové sady
+// api/hints.js
+// Serverless function for Gemini 2.0 Flash-Lite (fast & cheap)
+// Requires env GOOGLE_API_KEY on Vercel
 
 export const config = { runtime: "nodejs" };
 
-// ---------------------------------------------------------
-// CORS
-// ---------------------------------------------------------
 function setCors(res, origin = "*") {
   res.setHeader("Access-Control-Allow-Origin", origin || "*");
   res.setHeader("Vary", "Origin");
@@ -12,80 +11,49 @@ function setCors(res, origin = "*") {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-// ---------------------------------------------------------
-// STRICT PROMPTS – Czech + English
-// Přesně 3 sady × 4 řádky = 12 řádků
-// ---------------------------------------------------------
-
-function strictPromptCS() {
+/* ------------------------------------------------------------------
+   STRICT GAME PROMPT (3 sets, highly structured)
+------------------------------------------------------------------ */
+function strictGamePrompt(lang = "cs") {
   return `
-MÓD: WIKI-GAME STRICT (CS)
+Vygeneruj PŘESNĚ 3 různé sady kvízových otázek z dodaného textu.
 
-Vygeneruj přesně 3 sady otázek z dodaného textu. 
-Každá sada MUSÍ obsahovat přesně 4 řádky v tomto formátu:
+Každá sada musí být ve formátu přesně:
 
 Otázka?
 a) možnost A
 b) možnost B
 c) možnost C
 
-POVINNÉ:
-1) Otázky vycházejí výhradně z textu článku. NEVYMÝŠLEJ fakta, která nejsou uvedena.
-2) Jedna a pouze jedna odpověď MUSÍ být označena "(ano)".
-3) Distraktory MUSÍ být realistické a věcně související.
-4) Formát je striktní — žádné číslování, odrážky, emoji nebo komentáře.
-5) Žádné úvody, žádné vysvětlování, žádné prázdné řádky.
-6) Výstup = přesně 12 řádků.
-
-PŘÍKLAD DOBŘE:
-Kdy začala první světová válka?
-a) 1914 (ano)
-b) 1939
-c) 1905
-`;
+POŽADAVKY:
+- Každá sada obsahuje přesně 1 otázku + 3 možnosti.
+- Správnou možnost označ tak, že za ni dáš "(ano)" — např. "b) Oliva (ano)".
+- Ostatní možnosti musí být věrohodné (falešné, ale relevantní).
+- Každá otázka musí být jasná, krátká, faktická (jména, pojmy, místa, roky).
+- Bez úvodů, bez shrnutí, bez dodatečného textu.
+- Žádné prázdné řádky mezi sadami.
+`.trim();
 }
 
-function strictPromptEN() {
+/* ------------------------------------------------------------------
+   FACTS prompt (použit jen když mode=facts)
+------------------------------------------------------------------ */
+function strictFactsPrompt() {
   return `
-MODE: WIKI-GAME STRICT (EN)
+Vygeneruj 5–6 řádků faktů z dodaného textu, každý přesně:
 
-Generate exactly 3 question sets from the provided text.
-Each set MUST contain exactly 4 lines:
+Otázka? Odpověď: krátká správná odpověď
 
-Question?
-a) option A
-b) option B
-c) option C
-
-REQUIREMENTS:
-1) Base ALL questions strictly on the provided article text.
-2) Exactly ONE answer must be marked with "(yes)".
-3) Distractors must be realistic and topic-related.
-4) STRICT format — no numbering, no bullets, no extra lines.
-5) No introductions, no explanations, no empty lines.
-6) Output = exactly 12 lines.
-
-GOOD EXAMPLE:
-When did World War I begin?
-a) 1914 (yes)
-b) 1939
-c) 1905
-`;
+- Jedna otázka + jedna odpověď na jednom řádku.
+- Žádné seznamy, žádné další věty.
+`.trim();
 }
-
-// Routing for CS / EN
-function getStrictPrompt(lang = "cs") {
-  return lang === "en" ? strictPromptEN() : strictPromptCS();
-}
-
-// ---------------------------------------------------------
-// MAIN HANDLER
-// ---------------------------------------------------------
 
 export default async function handler(req, res) {
   try {
     const origin = req.headers?.origin || "*";
 
+    // Preflight
     if (req.method === "OPTIONS") {
       setCors(res, origin);
       return res.status(204).end();
@@ -93,50 +61,52 @@ export default async function handler(req, res) {
 
     if (req.method !== "POST") {
       setCors(res, origin);
-      return res.status(200).json({ ok: true, error: "Use POST" });
+      return res.status(200).json({ ok: true, info: "Use POST" });
     }
 
     setCors(res, origin);
 
-    // ----------------------------------------
-    // Parse incoming JSON
-    // ----------------------------------------
+    const apiKey = process.env.GOOGLE_API_KEY;
+    if (!apiKey) {
+      console.error("[hints] Missing GOOGLE_API_KEY");
+      return res.status(500).json({ error: "Missing GOOGLE_API_KEY" });
+    }
+
+    // Parse body
     let body = req.body;
     if (typeof body === "string") {
       try { body = JSON.parse(body); } catch {}
     }
-
-    const { context, mode, lang } = body || {};
-
-    if (!context || typeof context !== "string") {
-      return res.status(400).json({ error: 'Missing "context"' });
+    if (!body || typeof body !== "object") {
+      return res.status(400).json({ error: "Invalid JSON body" });
     }
 
-    const safeLang = (lang === "en" || lang === "cs") ? lang : "cs";
-    const safeMode = mode === "game" ? "game" : "facts";
+    const { context, mode = "facts", lang = "cs" } = body;
+    if (!context || typeof context !== "string") {
+      return res.status(400).json({ error: 'Missing "context" string' });
+    }
 
-    // ----------------------------------------
-    // Trim long input (speed!)
-    // ----------------------------------------
+    /* --------------------------------------------------------------
+       Limit input for speed (Flash-Lite loves shorter input)
+    -------------------------------------------------------------- */
     const MAX_INPUT = 4500;
     const ctx = context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
 
-    // ----------------------------------------
-    // Prepare prompts
-    // ----------------------------------------
-    const system = safeMode === "game"
-      ? getStrictPrompt(safeLang)
-      : "You are a factual assistant. Answer concisely.";
+    /* --------------------------------------------------------------
+       Build prompts
+    -------------------------------------------------------------- */
+    const system = mode === "game"
+      ? strictGamePrompt(lang)
+      : strictFactsPrompt();
 
-    const user = `Source article text:\n"""${ctx}"""\n\nVrať výstup přesně podle instrukcí. Language: ${safeLang}.`;
+    const user = `Zde je text článku:\n"""${ctx}"""\n\nDodrž prosím formát pro mód: ${mode}.`;
 
-    // ----------------------------------------
-    // Call Gemini 2.0 Flash
-    // ----------------------------------------
-    const apiKey = process.env.GOOGLE_API_KEY;
-    const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
+    /* --------------------------------------------------------------
+       CALL GEMINI 2.0 FLASH-LITE (FASTER)
+    -------------------------------------------------------------- */
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
 
-    const r = await fetch(`${url}?key=${apiKey}`, {
+    const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -146,35 +116,36 @@ export default async function handler(req, res) {
         ],
         generationConfig: {
           temperature: 0.5,
-          maxOutputTokens: 220
+          maxOutputTokens: 220, // optimal for 3 sets
         }
       })
     });
 
     if (!r.ok) {
-      const text = await r.text().catch(() => "");
-      console.error("[hints] Gemini error:", r.status, text);
-      return res.status(r.status).json({ error: "Gemini error", details: text });
+      const details = await r.text().catch(() => "");
+      console.error("[hints] Gemini error:", r.status, details?.slice?.(0, 200));
+      return res.status(r.status).json({ error: "Gemini error", details });
     }
 
-    const data = await r.json().catch(() => null);
-
-    const text =
-      data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("")?.trim() ||
-      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "";
-
-    const hints = (text || "").trim();
-
-    return res.status(200).json({
-      ok: true,
-      lang: safeLang,
-      mode: safeMode,
-      hints
+    const data = await r.json().catch((e) => {
+      console.error("[hints] JSON parse error:", e);
+      return null;
     });
 
+    const text =
+      data?.candidates?.[0]?.content?.parts
+        ?.map((p) => p.text)
+        .join("")
+        ?.trim() || "";
+
+    const hints = text.replace(/\r\n/g, "\n").trim();
+
+    return res.status(200).json({ hints, mode });
   } catch (e) {
     console.error("[hints] fatal", e);
-    return res.status(500).json({ error: "Server error", details: e.toString() });
+    return res.status(500).json({
+      error: "Internal error",
+      details: e?.toString()
+    });
   }
 }
