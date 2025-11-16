@@ -1,86 +1,61 @@
 // api/hints-gpt.js
-// GPT-4o-mini quiz generator (10 question sets → JSON) with multilingual support
-// Required env: OPENAI_API_KEY
+// GPT-4o-mini → 10 question sets → clean JSON → stable output
 
 export const config = { runtime: "nodejs" };
 
 function setCors(res, origin = "*") {
-  res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 /* -------------------------------------------------------------
-   GAME PROMPT (MULTILINGUAL, STRICT JSON REQUIRED)
+   MULTILINGUAL GAME PROMPT (JSON OUTPUT)
 ------------------------------------------------------------- */
-function gamePrompt(lang = "cs") {
-  const L = lang.trim().toLowerCase();
+function gamePrompt(language = "cs") {
+  const lang = language.trim().toLowerCase();
 
   return `
-You are a professional quiz generator.
-
-TASK:
-Generate EXACTLY 10 question sets from the provided article text.
-Return them STRICTLY as a valid JSON object.
+Generate **exactly 10** quiz question sets from the provided article text.
 
 LANGUAGE:
-- All questions & answers MUST be written fully in: ${L.toUpperCase()}
-- Ensure terminology is correct for the language.
-- No English leakage in non-English settings.
+- All output MUST be written strictly in: ${lang.toUpperCase()}.
 
-STRUCTURE OF EACH SET:
-{
-  "question": "string",
-  "answers": ["A", "B", "C"],
-  "correctIndex": 0|1|2
-}
+OUTPUT FORMAT:
+Return ONLY valid JSON in this format:
 
-STRICT RULES:
-- Exactly 10 sets in the array "questions".
-- Each question must be short, factual, based only on the article.
-- Wrong answers MUST be plausible, not random noise.
-- No trick questions, no extremely close numeric values.
-- Avoid asking about trivial calendar facts (e.g., "Which day is July 5?").
-- Favor well-defined facts (people, dates, locations, properties, meanings).
-
-JSON OUTPUT FORMAT (NO PREAMBLE, NO MARKDOWN):
 {
   "questions": [
     {
-      "question": "...",
-      "answers": ["a","b","c"],
+      "question": "string",
+      "answers": ["A","B","C"],
       "correctIndex": 0
-    }
+    },
+    ...
+    (10 items)
   ]
 }
 
-OUTPUT REQUIREMENTS:
-- Output ONLY valid JSON.
-- No text before or after JSON.
+RULES:
+- Exactly 10 items in "questions" array — no more, no less.
+- Each item must contain:
+    • "question" (short factual question)
+    • "answers": array of 3 strings
+    • "correctIndex": index of correct answer (0/1/2)
+- Wrong answers must be plausible but incorrect.
+- NO explanations, NO markdown, NO commentary.
+- JSON must be valid, no trailing commas.
+- Questions MUST be based ONLY on provided article text.
 `.trim();
 }
 
 /* -------------------------------------------------------------
-   ROBUST JSON EXTRACTOR (handles garbage / wrappers / noise)
-------------------------------------------------------------- */
-function extractJSONObject(str) {
-  const match = str.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-  try {
-    return JSON.parse(match[0]);
-  } catch (_) {
-    return null;
-  }
-}
-
-/* -------------------------------------------------------------
-   MAIN HANDLER
+   HANDLER
 ------------------------------------------------------------- */
 export default async function handler(req, res) {
   try {
     const origin = req.headers?.origin || "*";
-
     if (req.method === "OPTIONS") {
       setCors(res, origin);
       return res.status(204).end();
@@ -93,49 +68,58 @@ export default async function handler(req, res) {
 
     setCors(res, origin);
 
-    /* ---- API KEY ---- */
+    /* ----------------------------------------------
+       ENV VAR CHECK
+    ---------------------------------------------- */
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       console.error("[GPT-HINTS] Missing OPENAI_API_KEY");
       return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
     }
 
-    /* ---- Parse body ---- */
+    /* ----------------------------------------------
+       BODY PARSING
+    ---------------------------------------------- */
     let body = req.body;
     if (typeof body === "string") {
       try { body = JSON.parse(body); } catch {}
     }
+
     if (!body || typeof body !== "object") {
       return res.status(400).json({ error: "Invalid JSON body" });
     }
 
     const { context, language } = body;
+
     if (!context || typeof context !== "string") {
       return res.status(400).json({ error: 'Missing "context"' });
     }
 
-    const lang = (typeof language === "string" ? language : "cs").trim().toLowerCase();
+    const lang = (typeof language === "string" ? language : "cs")
+      .trim()
+      .toLowerCase();
 
-    /* ---- Input limit ---- */
-    const MAX_INPUT = 7000;
-    const ctx = context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
+    const MAX_INPUT = 5000;
+    const ctx =
+      context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
 
-    /* ---- Compose prompts ---- */
     const system = gamePrompt(lang);
-    const user = `
-Here is the article text in ${lang}:
-"""${ctx}"""
-Generate the required JSON object with exactly 10 question sets.
-`.trim();
 
-    /* ---------------------------------------------------------
-       CALL OPENAI GPT-4o-MINI
-    --------------------------------------------------------- */
+    const user = `
+Text v jazyce ${lang}:
+"""${ctx}"""
+
+GENERUJ JSON (10 otázek).
+    `.trim();
+
+    /* ----------------------------------------------
+       CALL OPENAI
+    ---------------------------------------------- */
     const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
@@ -143,72 +127,74 @@ Generate the required JSON object with exactly 10 question sets.
           { role: "system", content: system },
           { role: "user",   content: user }
         ],
-        max_output_tokens: 750,
-        temperature: 0.35
+        temperature: 0.35,
+        max_output_tokens: 750
       })
     });
 
-    const raw = await r.text();
-
     if (!r.ok) {
-      console.error("[GPT-HINTS] OpenAI error:", r.status, raw.slice(0, 300));
-      return res.status(r.status).json({
-        error: "OpenAI error",
-        raw: raw.slice(0, 500)
-      });
+      const errText = await r.text().catch(() => "");
+      console.error("[GPT-HINTS] OpenAI error:", r.status, errText);
+      return res.status(r.status).json({ error: "OpenAI error", details: errText });
     }
 
-    /* ---------------------------------------------------------
-       PARSE RAW RESPONSE → extract JSON safely
-    --------------------------------------------------------- */
-    let parsed = null;
+    const data = await r.json().catch(e => {
+      console.error("[GPT-HINTS] FAILED JSON:", e);
+      return null;
+    });
 
-    // Option 1: try as JSON (if model returned a wrapper)
+    /* ----------------------------------------------
+       EXTRACT RAW MODEL OUTPUT
+    ---------------------------------------------- */
+    const rawText =
+      data?.output?.[0]?.content?.[0]?.text ||
+      data?.output_text ||
+      "";
+
+    if (!rawText) {
+      console.error("[GPT-HINTS] Empty model output:", data);
+      return res.status(200).json({ error: "Empty output", raw: data });
+    }
+
+    /* ----------------------------------------------
+       PARSE JSON (INSIDE TEXT)
+    ---------------------------------------------- */
+    let parsed;
     try {
-      const top = JSON.parse(raw);
-      if (top.output_text) parsed = extractJSONObject(top.output_text);
-      else if (Array.isArray(top.output) && top.output[0]?.content)
-        parsed = extractJSONObject(top.output[0].content);
-    } catch (_) {
-      // ignore; move to fallback
-    }
-
-    // Option 2: extract JSON anywhere in raw text
-    if (!parsed) parsed = extractJSONObject(raw);
-
-    if (!parsed) {
-      console.error("[GPT-HINTS] No JSON object found in output.");
-      return res.status(500).json({
-        error: "Invalid JSON returned by model",
-        raw: raw.slice(0, 600)
+      parsed = JSON.parse(rawText);
+    } catch (e) {
+      console.error("[GPT-HINTS] JSON parse error:", e, rawText.slice(0, 250));
+      return res.status(200).json({
+        error: "invalid_json_in_raw",
+        raw: rawText
       });
     }
 
-    /* ---------------------------------------------------------
-       VALIDATE JSON SHAPE
-    --------------------------------------------------------- */
-    if (!Array.isArray(parsed.questions)) {
-      return res.status(500).json({
+    /* ----------------------------------------------
+       VALIDATE STRUCTURE
+    ---------------------------------------------- */
+    if (!parsed || !parsed.questions || !Array.isArray(parsed.questions)) {
+      console.error("[GPT-HINTS] JSON missing 'questions':", parsed);
+      return res.status(200).json({
         error: "JSON missing 'questions' array",
         parsed
       });
     }
 
-    /* ---------------------------------------------------------
-       SUCCESS
-    --------------------------------------------------------- */
+    /* ----------------------------------------------
+       OK — return for Webflow
+    ---------------------------------------------- */
     return res.status(200).json({
-      ok: true,
-      language: lang,
-      count: parsed.questions.length,
-      questions: parsed.questions
+      sets: parsed.questions,
+      mode: "game",
+      language: lang
     });
 
   } catch (err) {
-    console.error("[GPT-HINTS] Fatal:", err);
+    console.error("[GPT-HINTS] Fatal error:", err);
     return res.status(500).json({
-      error: "Internal server error",
-      details: err?.toString()
+      error: "internal_server_error",
+      details: err.toString()
     });
   }
 }
