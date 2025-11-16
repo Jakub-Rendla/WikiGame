@@ -1,9 +1,11 @@
 // api/hints-gemini-single.js
 // Gemini Flash-Lite single-question generator
 // - random slice
+// - strict JSON
 // - title filter (safe)
 // - numeric filter
-// - strict JSON extract
+// - answer-in-question filter
+// - robust JSON extract
 
 export const config = { runtime: "nodejs" };
 
@@ -30,7 +32,15 @@ function extractNumber(str) {
 function validateAnswers(obj, title) {
   if (!obj || !Array.isArray(obj.answers)) return false;
 
-  // TITLE FILTER — only if title exists
+  const qLower = obj.question.toLowerCase();
+
+  /* ANSWER-IN-QUESTION FILTER */
+  for (const ans of obj.answers) {
+    const a = ans.toLowerCase().trim();
+    if (a.length >= 3 && qLower.includes(a)) return false;
+  }
+
+  /* TITLE FILTER — safe */
   if (title && title.trim().length >= 3) {
     const t = title.trim().toLowerCase();
     for (const ans of obj.answers) {
@@ -38,7 +48,7 @@ function validateAnswers(obj, title) {
     }
   }
 
-  // NUMERIC SIMILARITY FILTER
+  /* NUMERIC SIMILARITY */
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
 
@@ -74,7 +84,9 @@ Vygeneruj PŘESNĚ jednu otázku jako JSON:
 PRAVIDLA:
 - Správná odpověď nesmí být název článku: "${title}".
 - Žádná odpověď nesmí obsahovat název článku.
+- Otázka nesmí obsahovat správnou odpověď ani její klíčové části.
 - Pokud je odpověď číslo, falešné musí být výrazně jiné.
+- Tři možnosti, jedna správná.
 - Bez markdownu, bez komentářů.
 - Jazyk: ${lang}
 `.trim();
@@ -96,7 +108,7 @@ function pickSlice(full) {
 }
 
 /* -------------------------------------------------------------
-   Gemini JSON cleanup
+   JSON cleanup
 ------------------------------------------------------------- */
 function extractJSON(text) {
   let cleaned = text
@@ -142,7 +154,8 @@ export default async function handler(req, res) {
     const system = strictJSONPrompt(lang, title);
     const user = `Zde je text článku:\n"""${chosen}"""\nVrať pouze JSON.`;
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
+    const url =
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
 
     const r = await fetch(url, {
       method: "POST",
