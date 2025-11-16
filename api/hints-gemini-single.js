@@ -1,19 +1,14 @@
 // api/hints-gemini-single.js
-// Gemini Flash-Lite single-question generator
-// - random slice
-// - strict JSON
-// - title filter (safe)
+// Gemini Flash-Lite single question generator
+// - title-aware
 // - numeric filter
 // - answer-in-question filter
+// - random slice
+// - strict JSON
 // - robust JSON extract
 
 export const config = { runtime: "nodejs" };
 
-import crypto from "crypto";
-
-/* -------------------------------------------------------------
-   CORS
-------------------------------------------------------------- */
 function setCors(res, origin = "*") {
   res.setHeader("Access-Control-Allow-Origin", origin || "*");
   res.setHeader("Vary", "Origin");
@@ -22,11 +17,34 @@ function setCors(res, origin = "*") {
 }
 
 /* -------------------------------------------------------------
-   Filters
+   Helpers
 ------------------------------------------------------------- */
 function extractNumber(str) {
   const m = str.match(/-?\d+(?:[\.,]\d+)?/);
   return m ? parseFloat(m[0].replace(",", ".")) : null;
+}
+
+function validateTitleFilter(answer, title) {
+  if (!title || title.trim().length < 3) return true;
+
+  const a = answer.toLowerCase().trim();
+  const t = title.toLowerCase().trim();
+
+  if (a === t) return false;
+
+  const titleWords = t.split(/\s+/).filter(w => w.length >= 3);
+  const ansWords = a.split(/\s+/);
+
+  if (!titleWords.length) return true;
+
+  let overlap = 0;
+  for (const tw of titleWords) {
+    for (const aw of ansWords) {
+      if (aw === tw) overlap++;
+    }
+  }
+
+  return overlap < Math.ceil(titleWords.length * 0.5);
 }
 
 function validateAnswers(obj, title) {
@@ -34,21 +52,18 @@ function validateAnswers(obj, title) {
 
   const qLower = obj.question.toLowerCase();
 
-  /* ANSWER-IN-QUESTION FILTER */
+  // answer-in-question filter
   for (const ans of obj.answers) {
     const a = ans.toLowerCase().trim();
     if (a.length >= 3 && qLower.includes(a)) return false;
   }
 
-  /* TITLE FILTER — safe */
-  if (title && title.trim().length >= 3) {
-    const t = title.trim().toLowerCase();
-    for (const ans of obj.answers) {
-      if (ans.toLowerCase().includes(t)) return false;
-    }
+  // title filter
+  for (const ans of obj.answers) {
+    if (!validateTitleFilter(ans, title)) return false;
   }
 
-  /* NUMERIC SIMILARITY */
+  // numeric
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
 
@@ -73,7 +88,7 @@ function validateAnswers(obj, title) {
 ------------------------------------------------------------- */
 function strictJSONPrompt(lang, title) {
   return `
-Vygeneruj PŘESNĚ jednu otázku jako JSON:
+Vygeneruj přesně 1 otázku jako JSON:
 
 {
   "question": "...",
@@ -82,12 +97,11 @@ Vygeneruj PŘESNĚ jednu otázku jako JSON:
 }
 
 PRAVIDLA:
-- Správná odpověď nesmí být název článku: "${title}".
-- Žádná odpověď nesmí obsahovat název článku.
-- Otázka nesmí obsahovat správnou odpověď ani její klíčové části.
-- Pokud je odpověď číslo, falešné musí být výrazně jiné.
-- Tři možnosti, jedna správná.
-- Bez markdownu, bez komentářů.
+- Otázka nesmí obsahovat správnou odpověď.
+- Správná odpověď nesmí být přesně název článku: "${title}".
+- Žádná odpověď nesmí obsahovat název článku nebo být příliš podobná.
+- Pokud je odpověď číslo, falešné hodnoty musí být hodně odlišné.
+- Bez markdownu.
 - Jazyk: ${lang}
 `.trim();
 }
@@ -121,7 +135,7 @@ function extractJSON(text) {
 }
 
 /* -------------------------------------------------------------
-   HANDLER
+   Handler
 ------------------------------------------------------------- */
 export default async function handler(req, res) {
   try {
@@ -143,9 +157,7 @@ export default async function handler(req, res) {
     if (!apiKey) return res.status(500).json({ error: "Missing GOOGLE_API_KEY" });
 
     let body = req.body;
-    if (typeof body === "string") {
-      try { body = JSON.parse(body); } catch {}
-    }
+    if (typeof body === "string") try { body = JSON.parse(body); } catch {}
 
     const { context = "", lang = "cs", title = "" } = body;
     if (!context) return res.status(400).json({ error: "Missing context" });
@@ -165,7 +177,10 @@ export default async function handler(req, res) {
           { role: "user", parts: [{ text: system }] },
           { role: "user", parts: [{ text: user }] }
         ],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 200 }
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 200
+        }
       })
     });
 
@@ -174,7 +189,7 @@ export default async function handler(req, res) {
 
     let text =
       data?.candidates?.[0]?.content?.parts
-        ?.map((p) => p.text)
+        ?.map(p => p.text)
         .join("")
         ?.trim() || "";
 
