@@ -1,113 +1,84 @@
 // api/hints-gpt.js
-// GPT-4o-mini → 10 quiz sets → JSON output → Topic-focused questions
+// GPT-4o-mini quiz generator (10 question sets) with strict JSON output
+// Requires env: OPENAI_API_KEY
 
 export const config = { runtime: "nodejs" };
 
+// -------------------------------------------------------------
+// CORS
+// -------------------------------------------------------------
 function setCors(res, origin = "*") {
-  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Origin", origin || "*");
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-/* -------------------------------------------------------------
-   MULTILINGUAL + TOPIC-FOCUSED GAME PROMPT (STRICT JSON)
-------------------------------------------------------------- */
-function gamePrompt(language = "cs") {
-  const lang = language.trim().toLowerCase();
+// -------------------------------------------------------------
+// SYSTEM PROMPT GENERATOR
+// -------------------------------------------------------------
+function gamePrompt(lang = "cs") {
+  const L = lang.trim().toLowerCase();
 
   return `
-You generate quiz questions **strictly based on the provided article**.
+You are a quiz generator for the WikiGame.
 
-LANGUAGE:
-- All output MUST be written strictly in: ${lang.toUpperCase()}.
+TASK:
+- Create EXACTLY 10 question sets.
+- Each set must contain:
+  {
+    "question": "...",
+    "answers": ["A","B","C"],
+    "correctIndex": 0|1|2
+  }
 
-OUTPUT FORMAT (VERY STRICT):
-Return ONLY valid JSON in this exact structure:
+LANGUAGE RULE:
+- ALL content (questions + answers) must be written strictly in: ${L.toUpperCase()}.
+- Do NOT translate incorrectly.
+- Stay STRICTLY within facts mentioned in the provided article excerpt.
+- If the article is about sub-topic X, DO NOT drift into global/general topic Y.
 
+QUESTION RULES:
+- Must be factual, relevant, short, and derived solely from the given article.
+- Avoid overly generic questions not grounded in the text.
+- Avoid overly detailed numeric comparisons (e.g., 1–3 %, 2–4 %, etc.)
+- Avoid trick questions.
+
+ANSWER RULES:
+- Provide 3 options (A, B, C).
+- EXACTLY ONE must be correct.
+- Wrong answers must be plausible but clearly incorrect.
+- No formatting, no markdown.
+
+OUTPUT:
+Return STRICT VALID JSON:
 {
-  "questions": [
-    {
-      "question": "string",
-      "answers": ["A","B","C"],
-      "correctIndex": 0
-    },
-    ...
-    (10 items total)
-  ]
+  "questions": [ ... 10 sets ... ]
 }
-
-NO extra text. No markdown. No commentary. No trailing commas.
-
-
-======================================================
-   RULES ABOUT QUESTION RELEVANCE (VERY IMPORTANT)
-======================================================
-
-1) **Questions must be ONLY about specific facts in the article.**
-   - Questions must be directly tied to the main subject of the article.
-   - Use only concrete facts explicitly found in the article text.
-
-2) **NEVER generate questions about general concepts** that appear only incidentally.
-   Forbidden examples:
-     - generic history / geology / biology
-     - definitions (e.g. "What is history?")
-     - general periods (e.g. "What is the Early Modern Age?")
-     - general language or science questions
-     - anything that could fit ANY article
-
-3) **Avoid vague or overly broad questions.**
-   - Prefer specific events, names, dates, terms, locations, facts.
-   - Prefer concrete details over abstractions.
-
-4) **Questions must be diverse.**
-   - Avoid repeating similar patterns.
-   - Each question should touch a different specific aspect of the article.
-
-5) **Answers must be plausible.**
-   - Wrong answers must be believable, not random.
-
-6) **Correct answer must be 100% extractable from the article.**
-   - No guessing.
-   - No outside knowledge unless it's extremely basic background required for clarity.
-
-7) **You MUST produce exactly 10 question objects.**
-
-======================================================
-
-Now generate the JSON.
 `.trim();
 }
 
-/* -------------------------------------------------------------
-   HANDLER
-------------------------------------------------------------- */
+// -------------------------------------------------------------
+// HANDLER
+// -------------------------------------------------------------
 export default async function handler(req, res) {
   try {
     const origin = req.headers?.origin || "*";
+
+    // OPTIONS (preflight)
     if (req.method === "OPTIONS") {
       setCors(res, origin);
       return res.status(204).end();
     }
+
+    // ⭐ CORS MUST BE ENABLED FOR ALL RESPONSES ⭐
+    setCors(res, origin);
+
     if (req.method !== "POST") {
-      setCors(res, origin);
       return res.status(200).json({ ok: true, info: "Use POST" });
     }
 
-    setCors(res, origin);
-
-    /* ----------------------------------------------
-       ENV VAR CHECK
-    ---------------------------------------------- */
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      console.error("[GPT-HINTS] Missing OPENAI_API_KEY");
-      return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
-    }
-
-    /* ----------------------------------------------
-       BODY
-    ---------------------------------------------- */
+    // Parse JSON body
     let body = req.body;
     if (typeof body === "string") {
       try { body = JSON.parse(body); } catch {}
@@ -117,116 +88,107 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Invalid JSON body" });
     }
 
-    const { context, language } = body;
+    const { context, lang } = body;
 
     if (!context || typeof context !== "string") {
       return res.status(400).json({ error: 'Missing "context"' });
     }
 
-    const lang = (typeof language === "string" ? language : "cs")
-      .trim()
-      .toLowerCase();
+    // default language = cs
+    const L = (typeof lang === "string" ? lang : "cs").trim().toLowerCase();
 
-    // Trim input for speed
-    const MAX_INPUT = 7000;
+    // input length guardrail
+    const MAX_INPUT = 6000;
     const ctx = context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
 
-    const system = gamePrompt(lang);
-
+    const system = gamePrompt(L);
     const user = `
-Text článku v jazyce ${lang}:
+ARTICLE TEXT (${L}):
 """${ctx}"""
-
-Vrať pouze JSON podle přísného formátu výše.
     `.trim();
 
-    /* ----------------------------------------------
-       CALL OPENAI
-    ---------------------------------------------- */
-    const r = await fetch("https://api.openai.com/v1/responses", {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      console.error("[GPT-HINTS] Missing OPENAI_API_KEY!");
+      return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+    }
+
+    // ---------------------------------------------------------
+    // OPENAI CALL (Responses API)
+    // ---------------------------------------------------------
+    const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        "Authorization": \`Bearer \${apiKey}\`,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
+        max_output_tokens: 900,
+        temperature: 0.35,
         input: [
           { role: "system", content: system },
-          { role: "user",   content: user }
-        ],
-        temperature: 0.4,
-        max_output_tokens: 800
+          { role: "user", content: user }
+        ]
       })
     });
 
-    if (!r.ok) {
-      const errorTxt = await r.text().catch(() => "");
-      console.error("[GPT-HINTS] OpenAI error:", r.status, errorTxt);
-      return res.status(r.status).json({ error: "OpenAI error", details: errorTxt });
+    const rawText = await response.text();
+
+    if (!response.ok) {
+      console.error("[GPT-HINTS] OpenAI error:", response.status, rawText.slice(0, 400));
+      return res.status(response.status).json({
+        error: "OpenAI error",
+        details: rawText
+      });
     }
 
-    const data = await r.json().catch(e => {
-      console.error("[GPT-HINTS] OpenAI JSON parse fail", e);
-      return null;
-    });
-
-    /* ----------------------------------------------
-       EXTRACT RAW MODEL OUTPUT
-    ---------------------------------------------- */
-    const rawText =
-      data?.output?.[0]?.content?.[0]?.text ||
-      data?.output_text ||
-      "";
-
-    if (!rawText) {
-      console.error("[GPT-HINTS] Model returned empty output", data);
-      return res.status(200).json({ error: "empty_output", raw: data });
-    }
-
-    /* ----------------------------------------------
-       PARSE JSON INSIDE RAW
-    ---------------------------------------------- */
+    // ---------------------------------------------------------
+    // PARSE MODEL OUTPUT
+    // ---------------------------------------------------------
     let parsed;
     try {
-      parsed = JSON.parse(rawText);
-    } catch (e) {
-      console.error("[GPT-HINTS] JSON parse error:", e, rawText.slice(0, 250));
-      return res.status(200).json({
-        error: "invalid_json_in_raw",
+      // output_text = already extracted plain text
+      const json = JSON.parse(rawText);
+      const out = json?.output_text;
+
+      if (!out) {
+        return res.status(500).json({
+          error: "Model did not return output_text",
+          raw: json
+        });
+      }
+
+      parsed = JSON.parse(out);
+    } catch (err) {
+      console.error("[GPT-HINTS] JSON parse fail:", err);
+      return res.status(500).json({
+        error: "Invalid JSON returned by model",
         raw: rawText
       });
     }
 
-    /* ----------------------------------------------
-       VALIDATE
-    ---------------------------------------------- */
-    if (!parsed.questions || !Array.isArray(parsed.questions)) {
-      console.error("[GPT-HINTS] JSON missing questions[]:", parsed);
-      return res.status(200).json({
-        error: "missing_questions_array",
+    if (!parsed?.questions || !Array.isArray(parsed.questions)) {
+      return res.status(500).json({
+        error: "JSON missing 'questions' array",
         parsed
       });
     }
 
-    if (parsed.questions.length !== 10) {
-      console.warn("[GPT-HINTS] Wrong number of questions:", parsed.questions.length);
-    }
-
-    /* ----------------------------------------------
-       OUTPUT FOR WEBFLOW
-    ---------------------------------------------- */
+    // ---------------------------------------------------------
+    // SUCCESS
+    // ---------------------------------------------------------
     return res.status(200).json({
-      sets: parsed.questions,
-      mode: "game",
-      language: lang
+      ok: true,
+      lang: L,
+      questions: parsed.questions
     });
 
   } catch (err) {
-    console.error("[GPT-HINTS] Fatal:", err);
+    console.error("[GPT-HINTS] Fatal error:", err);
     return res.status(500).json({
-      error: "fatal",
-      details: err.toString()
+      error: "Server failure",
+      details: err?.toString()
     });
   }
 }
