@@ -1,11 +1,10 @@
 // api/hints-gpt-single.js
 // Single-question generator for GPT-4o-mini
-// Features:
 // - random slice
 // - strict JSON
 // - title filter (safe)
 // - numeric similarity filter
-// - no markdown
+// - answer-in-question filter
 // - robust validation
 
 export const config = { runtime: "nodejs" };
@@ -23,7 +22,7 @@ function setCors(res, origin = "*") {
 }
 
 /* -------------------------------------------------------------
-   Helpers: numeric + title validation
+   Helpers: numeric + title + answer-in-question validation
 ------------------------------------------------------------- */
 function extractNumber(str) {
   const m = str.match(/-?\d+(?:[\.,]\d+)?/);
@@ -33,7 +32,15 @@ function extractNumber(str) {
 function validateAnswers(obj, title) {
   if (!obj || !Array.isArray(obj.answers)) return false;
 
-  /* TITLE FILTER — only if title is long enough */
+  const qLower = obj.question.toLowerCase();
+
+  /* ANSWER-IN-QUESTION FILTER */
+  for (const ans of obj.answers) {
+    const a = ans.toLowerCase().trim();
+    if (a.length >= 3 && qLower.includes(a)) return false;
+  }
+
+  /* TITLE FILTER — only if title exists and >=3 chars */
   if (title && title.trim().length >= 3) {
     const t = title.trim().toLowerCase();
     for (const ans of obj.answers) {
@@ -54,7 +61,6 @@ function validateAnswers(obj, title) {
       const diff = Math.abs(fake - correct);
       const rel = diff / Math.max(1, Math.abs(correct));
 
-      // Reject if too close (<10 units OR <10%)
       if (diff < 10 || rel < 0.10) return false;
     }
   }
@@ -78,12 +84,13 @@ Generate ONE quiz question in STRICT JSON:
 RULES:
 - Use ONLY the article text.
 - Avoid trivial facts from the first sentences.
+- Never include the correct answer or its key parts directly in the question.
 - The correct answer must NOT be the article title: "${title}".
-- No answer may contain the article title (unless empty title).
-- If the correct answer is numeric, fake answers must differ strongly.
-  Avoid values that are too close (±10 units or ±10%).
+- No answer may contain the article title (unless empty).
+- If the answer is numeric, fake answers must be very different
+  (avoid values within ±10 units or ±10%).
 - Answers must be short, factual, plausible.
-- No markdown, no comments.
+- No markdown, no commentary.
 - Language: ${lang}
 `.trim();
 }
