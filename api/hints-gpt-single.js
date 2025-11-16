@@ -1,6 +1,10 @@
 // api/hints-gpt-single.js
-// Ultra-fast single-question generator for WikiGame
-// Random text slicing + higher temperature = more variety
+// Single-question generator with:
+// - random slicing
+// - title filter
+// - numeric similarity filter
+// - strict JSON output
+// - GPT-4o-mini
 
 export const config = { runtime: "nodejs" };
 
@@ -10,57 +14,90 @@ import crypto from "crypto";
    CORS
 ------------------------------------------------------------- */
 function setCors(res, origin = "*") {
-  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Origin", origin || "*");
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+/* -------------------------------------------------------------
+   Title + number filtering
+------------------------------------------------------------- */
+function extractNumber(str) {
+  const m = str.match(/-?\d+(?:[\.,]\d+)?/);
+  return m ? parseFloat(m[0].replace(",", ".")) : null;
+}
+
+function validateAnswers(obj, title) {
+  if (!obj || !Array.isArray(obj.answers)) return false;
+
+  const t = title.toLowerCase();
+
+  // title filter
+  for (const ans of obj.answers) {
+    if (ans.toLowerCase().includes(t)) return false;
+  }
+
+  // numeric similarity filter
+  const nums = obj.answers.map(extractNumber);
+  const correct = nums[obj.correctIndex];
+
+  if (correct !== null) {
+    for (let i = 0; i < nums.length; i++) {
+      if (i === obj.correctIndex) continue;
+      const fake = nums[i];
+      if (fake === null) continue;
+
+      const diff = Math.abs(fake - correct);
+      const rel = diff / Math.max(1, Math.abs(correct));
+
+      // reject if too close (±10 or ±10%)
+      if (diff < 10 || rel < 0.10) return false;
+    }
+  }
+
+  return true;
 }
 
 /* -------------------------------------------------------------
    Build prompt
 ------------------------------------------------------------- */
-function buildPrompt(lang = "cs") {
+function buildPrompt(lang, title) {
   return `
 Generate ONE quiz question in STRICT JSON format.
 
-LANGUAGE: ${lang}
-
-RULES:
-- Use ONLY the supplied article text.
-- The question must be meaningful and based on non-trivial details.
-- Avoid obvious or superficial facts from first sentences.
-- Provide EXACTLY 3 answers: 1 correct, 2 plausible but wrong.
-- Keep answers under 80 characters.
-- Avoid nearly identical numeric answers.
-- Avoid overly generic or universally true statements.
-- No invented details.
-
-OUTPUT STRICT JSON:
+OUTPUT MUST BE:
 {
   "question": "...",
   "answers": ["A","B","C"],
   "correctIndex": 1
 }
 
-NO markdown.
-NO extra text.
-NO commentary.
-  `.trim();
+RULES:
+- Use ONLY the supplied article text.
+- Avoid trivial or obvious facts from the first sentences.
+- The correct answer MUST NOT be the article title: "${title}".
+- No answer option may contain the article title (even in declined form).
+- If the correct answer is numeric (year, %, count), fake answers must differ substantially.
+  Avoid nearly identical numeric values (±10 units or ±10%).
+- 3 answers total, short, factual, plausible.
+- No invented facts.
+- NO markdown, NO comments.
+
+Language: ${lang}
+`.trim();
 }
 
 /* -------------------------------------------------------------
-   Pick random text slice for variety
+   Random slice
 ------------------------------------------------------------- */
 function pickSlice(full) {
   const len = full.length;
+  if (len < 3500) return full;
 
-  // If short, return full
-  if (len < 4000) return full;
-
-  // 50% full, 50% slice
   if (Math.random() < 0.5) return full;
 
-  const sliceLen = 3200 + Math.floor(Math.random() * 400); // 3200–3600 chars
+  const sliceLen = 3000 + Math.floor(Math.random() * 600);
   const maxStart = Math.max(0, len - sliceLen);
   const start = Math.floor(Math.random() * maxStart);
 
@@ -71,55 +108,46 @@ function pickSlice(full) {
    HANDLER
 ------------------------------------------------------------- */
 export default async function handler(req, res) {
-  const origin = req.headers?.origin || "*";
-
-  if (req.method === "OPTIONS") {
-    setCors(res, origin);
-    return res.status(204).end();
-  }
-
-  if (req.method !== "POST") {
-    setCors(res, origin);
-    return res.status(200).json({ ok: true, info: "Use POST" });
-  }
-
-  setCors(res, origin);
-
-  // Check API key
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
-  }
-
-  // Parse JSON body
-  let body = req.body;
-  if (typeof body === "string") {
-    try { body = JSON.parse(body); } catch {}
-  }
-
-  const { lang = "cs", context = "" } = body;
-
-  if (!context.trim()) {
-    return res.status(400).json({ error: "Missing context" });
-  }
-
-  /* Prepare prompts */
-  const systemPrompt = buildPrompt(lang);
-
-  // Pick random portion of the article
-  const chosenText = pickSlice(context);
-
-  const userPrompt = `
-ARTICLE TEXT:
-"""${chosenText}"""
-  `.trim();
-
-  /* ---------------------------------------------------------
-     CALL OPENAI RESPONSES API
-  --------------------------------------------------------- */
-  let response;
   try {
-    response = await fetch("https://api.openai.com/v1/responses", {
+    const origin = req.headers?.origin || "*";
+
+    if (req.method === "OPTIONS") {
+      setCors(res, origin);
+      return res.status(204).end();
+    }
+
+    if (req.method !== "POST") {
+      setCors(res, origin);
+      return res.status(200).json({ ok: true, info: "Use POST" });
+    }
+
+    setCors(res, origin);
+
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+    }
+
+    let body = req.body;
+    if (typeof body === "string") {
+      try { body = JSON.parse(body); } catch {}
+    }
+
+    const { context = "", lang = "cs", title = "" } = body;
+
+    if (!context) {
+      return res.status(400).json({ error: "Missing context" });
+    }
+
+    const chosen = pickSlice(context);
+    const systemPrompt = buildPrompt(lang, title);
+
+    const userPrompt = `
+ARTICLE TEXT:
+"""${chosen}"""
+`.trim();
+
+    const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -131,60 +159,33 @@ ARTICLE TEXT:
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt }
         ],
-        max_output_tokens: 180,
-        temperature: 0.60
+        temperature: 0.60,
+        max_output_tokens: 180
       })
     });
+
+    const raw = await response.json().catch(() => null);
+    if (!raw) return res.status(500).json({ error: "Invalid OpenAI response" });
+
+    if (raw.error) return res.status(500).json({ error: raw.error });
+
+    let text = raw.output?.[0]?.content?.[0]?.text || null;
+    if (!text) return res.status(500).json({ error: "No text returned", raw });
+
+    let obj;
+    try {
+      obj = JSON.parse(text);
+    } catch (err) {
+      return res.status(500).json({ error: "Invalid JSON", rawText: text });
+    }
+
+    if (!validateAnswers(obj, title)) {
+      return res.status(500).json({ error: "Answer validation failed", obj });
+    }
+
+    return res.status(200).json(obj);
+
   } catch (err) {
-    return res.status(500).json({
-      error: "Connection to OpenAI failed",
-      details: err.toString()
-    });
+    return res.status(500).json({ error: "Fatal", details: err.toString() });
   }
-
-  const raw = await response.json().catch(() => null);
-
-  if (!raw) {
-    return res.status(500).json({
-      error: "Invalid OpenAI response (empty)"
-    });
-  }
-
-  if (raw.error) {
-    return res.status(500).json({
-      error: "OpenAI model error",
-      details: raw.error
-    });
-  }
-
-  /* Extract text */
-  let text = null;
-  try { text = raw.output?.[0]?.content?.[0]?.text; } catch {}
-
-  if (!text) {
-    return res.status(500).json({
-      error: "Model did not return usable text",
-      raw
-    });
-  }
-
-  /* Parse JSON */
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (err) {
-    return res.status(500).json({
-      error: "Invalid JSON returned by model",
-      rawText: text
-    });
-  }
-
-  if (!parsed || !Array.isArray(parsed.answers)) {
-    return res.status(500).json({
-      error: "Invalid structure (answers missing)",
-      parsed
-    });
-  }
-
-  return res.status(200).json(parsed);
 }
