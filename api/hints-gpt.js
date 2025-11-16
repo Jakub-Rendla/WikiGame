@@ -108,7 +108,6 @@ Generate exactly 3 question sets following the strict rules.
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
-        reasoning: { effort: "medium" },
         input: [
           { role: "system", content: system },
           { role: "user",   content: user }
