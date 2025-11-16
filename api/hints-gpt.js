@@ -1,51 +1,56 @@
 // api/hints-gpt.js
 // GPT-4o-mini quiz generator (7 sets → JSON)
-// Ready for multilingual Webflow integration
-// Required: OPENAI_API_KEY
+// Requires: OPENAI_API_KEY
 
 export const config = { runtime: "nodejs" };
 
-function setCors(res, origin="*") {
+/* -------------------------------------------------------------
+   CORS
+------------------------------------------------------------- */
+function setCors(res, origin = "*") {
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
 }
 
 /* -------------------------------------------------------------
    MULTILINGUAL PROMPT
 ------------------------------------------------------------- */
-function buildPrompt(lang="cs") {
+function buildPrompt(lang = "cs") {
   return `
 Generate EXACTLY 7 quiz question sets in STRICT JSON format.
 
 LANGUAGE: ${lang}
 
 RULES:
-- Use ONLY facts visible in the provided article text.
-- Do NOT invent unrelated global facts.
-- Avoid questions with confusingly similar numeric options.
-- Avoid overly broad or general questions.
+- Questions must be based ONLY on the article.
+- Do NOT use general knowledge unless explicitly in article.
+- Avoid questions unrelated to the article theme.
+- Avoid generic universal facts.
+- Avoid trick questions with nearly identical numeric values.
 - Avoid repeating question topics.
-- Make questions factual, specific, clear.
-- Answers must be short.
-- Provide exactly 3 answer options.
-- Only ONE correct answer.
+- Focus on specific, factual details found ONLY inside the given text.
+- Answers must all be plausible.
+- EXACTLY one correct answer.
 
-OUTPUT FORMAT (STRICT):
-
+OUTPUT STRICTLY AS VALID JSON:
 {
   "questions": [
     {
-      "question": "…",
+      "question": "...",
       "answers": ["A", "B", "C"],
       "correctIndex": 0
-    },
-    ...
+    }
   ]
 }
 
-DO NOT add commentary, markdown, quotes, or text outside JSON.
+NO markdown.
+NO comments.
+NO natural language outside JSON.
 `.trim();
 }
 
@@ -82,14 +87,15 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Invalid JSON body" });
   }
 
-  const { lang="cs", context="" } = body;
+  const { lang = "cs", context = "" } = body;
 
   if (!context.trim()) {
     return res.status(400).json({ error: "Missing context" });
   }
 
-  /* --------------------- PROMPTS ---------------------- */
+  /* Prepare prompt */
   const systemPrompt = buildPrompt(lang);
+
   const userPrompt = `
 ARTICLE TEXT:
 """${context.slice(0, 9000)}"""
@@ -107,10 +113,10 @@ ARTICLE TEXT:
         "Authorization": `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini-2024-07-18-fast", // can switch to non-fast if needed
+        model: "gpt-4o-mini-2024-07-18-fast",
         input: [
-          { role:"system", content: systemPrompt },
-          { role:"user",   content: userPrompt }
+          { role: "system", content: systemPrompt },
+          { role: "user",   content: userPrompt }
         ],
         max_output_tokens: 500,
         temperature: 0.35
@@ -126,39 +132,31 @@ ARTICLE TEXT:
   const raw = await response.json().catch(() => null);
 
   if (!raw) {
-    return res.status(500).json({ error: "Invalid OpenAI response" });
+    return res.status(500).json({
+      error: "Invalid OpenAI response (empty)"
+    });
   }
 
   /* ---------------------------------------------------------
-     ROBUST OUTPUT EXTRACTION (covers all OpenAI formats)
+     CATCH explicit OpenAI error object
   --------------------------------------------------------- */
-
-  let text = null;
-
-  try {
-    // Format A: modern → output[0].content[].text (most common)
-    const content = raw.output?.[0]?.content;
-    if (Array.isArray(content)) {
-      const found = content.find(c => c.type === "output_text");
-      if (found?.text) text = found.text;
-    }
-
-    // Format B: fallback → raw.output_text
-    if (!text && typeof raw.output_text === "string") {
-      text = raw.output_text;
-    }
-
-    // Format C: legacy → raw.output[0].content[0].text
-    if (!text && raw.output?.[0]?.content?.[0]?.text) {
-      text = raw.output[0].content[0].text;
-    }
-
-  } catch (err) {
+  if (raw.error) {
     return res.status(500).json({
-      error: "Error extracting text from model",
-      raw
+      error: "OpenAI model error",
+      details: raw.error
     });
   }
+
+  /* ---------------------------------------------------------
+     EXTRACT TEXT — SUPPORT ALL RESPONSE SHAPES
+  --------------------------------------------------------- */
+  let text = null;
+
+  // new format
+  try { text = raw.output?.[0]?.content?.[0]?.text; } catch {}
+
+  // fallback: legacy
+  if (!text) try { text = raw.output_text; } catch {}
 
   if (!text) {
     return res.status(500).json({
@@ -168,7 +166,7 @@ ARTICLE TEXT:
   }
 
   /* ---------------------------------------------------------
-     PARSE JSON SAFELY
+     PARSE JSON
   --------------------------------------------------------- */
   let parsed;
   try {
@@ -176,7 +174,7 @@ ARTICLE TEXT:
   } catch (err) {
     return res.status(500).json({
       error: "Invalid JSON returned by model",
-      raw: text
+      rawText: text
     });
   }
 
@@ -187,7 +185,7 @@ ARTICLE TEXT:
     });
   }
 
-  /* ---------------------- SUCCESS ---------------------- */
+  /* SUCCESS */
   return res.status(200).json({
     questions: parsed.questions,
     count: parsed.questions.length,
