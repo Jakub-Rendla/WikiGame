@@ -1,6 +1,6 @@
 // api/hints-gpt.js
-// GPT-4o-mini JSON quiz generator (10 sets → Webflow picks 3)
-// Required: OPENAI_API_KEY in Vercel → Project → Settings → Environment Variables
+// GPT-4o-mini quiz generator (10 question sets → JSON) with multilingual support
+// Required env: OPENAI_API_KEY
 
 export const config = { runtime: "nodejs" };
 
@@ -12,65 +12,70 @@ function setCors(res, origin = "*") {
 }
 
 /* -------------------------------------------------------------
-   GAME PROMPT – GENERATE 10 UNIQUE QUESTION SETS IN JSON
+   GAME PROMPT (MULTILINGUAL, STRICT JSON REQUIRED)
 ------------------------------------------------------------- */
-function gamePrompt(language = "cs") {
-  const lang = language.trim().toLowerCase();
+function gamePrompt(lang = "cs") {
+  const L = lang.trim().toLowerCase();
 
   return `
-You generate JSON ONLY.
+You are a professional quiz generator.
 
-Produce EXACTLY 10 unique, high-quality quiz question sets based ONLY on the provided article.
+TASK:
+Generate EXACTLY 10 question sets from the provided article text.
+Return them STRICTLY as a valid JSON object.
 
 LANGUAGE:
-- All text MUST be strictly in: ${lang.toUpperCase()}.
+- All questions & answers MUST be written fully in: ${L.toUpperCase()}
+- Ensure terminology is correct for the language.
+- No English leakage in non-English settings.
 
-QUESTION RULES:
-- Questions must be meaningful, factual, and based on important information in the article.
-- All 10 questions must cover DIFFERENT aspects of the topic.
-- Avoid trivial questions with obvious answers.
-- Avoid numeric-only questions (exact sizes, distances, rankings, tiny number differences).
-- Avoid hyper-specific or low-value facts.
-- Prefer people, places, events, concepts, relationships.
-- Avoid repeating the same phrasing or topic.
+STRUCTURE OF EACH SET:
+{
+  "question": "string",
+  "answers": ["A", "B", "C"],
+  "correctIndex": 0|1|2
+}
 
-ANSWER RULES:
-Each set contains:
-- 1 question
-- 3 answers (a/b/c)
-- Exactly 1 correct answer → marked with "(ano)"
-- 2 distractors of SAME TYPE (country→countries, person→people, year→years)
-- Distractors must be plausible, realistic, and not absurd.
-- DO NOT create distractors that differ only by tiny numbers.
-- DO NOT repeat the same entity.
+STRICT RULES:
+- Exactly 10 sets in the array "questions".
+- Each question must be short, factual, based only on the article.
+- Wrong answers MUST be plausible, not random noise.
+- No trick questions, no extremely close numeric values.
+- Avoid asking about trivial calendar facts (e.g., "Which day is July 5?").
+- Favor well-defined facts (people, dates, locations, properties, meanings).
 
-OUTPUT FORMAT (MUST be valid JSON):
+JSON OUTPUT FORMAT (NO PREAMBLE, NO MARKDOWN):
 {
   "questions": [
     {
-      "question": "text",
-      "answers": [
-        "option A",
-        "option B (ano)",
-        "option C"
-      ]
-    },
-    ...
-    (10 items)
+      "question": "...",
+      "answers": ["a","b","c"],
+      "correctIndex": 0
+    }
   ]
 }
 
-STRICT:
-- Output JSON ONLY.
-- No markdown.
-- No backticks.
-- No explanations.
+OUTPUT REQUIREMENTS:
+- Output ONLY valid JSON.
 - No text before or after JSON.
 `.trim();
 }
 
 /* -------------------------------------------------------------
-   API HANDLER (robust OpenAI Responses API parser)
+   ROBUST JSON EXTRACTOR (handles garbage / wrappers / noise)
+------------------------------------------------------------- */
+function extractJSONObject(str) {
+  const match = str.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[0]);
+  } catch (_) {
+    return null;
+  }
+}
+
+/* -------------------------------------------------------------
+   MAIN HANDLER
 ------------------------------------------------------------- */
 export default async function handler(req, res) {
   try {
@@ -83,20 +88,19 @@ export default async function handler(req, res) {
 
     if (req.method !== "POST") {
       setCors(res, origin);
-      return res.status(200).json({ ok: true, info: "POST required" });
+      return res.status(200).json({ ok: true, info: "Use POST" });
     }
 
     setCors(res, origin);
 
+    /* ---- API KEY ---- */
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       console.error("[GPT-HINTS] Missing OPENAI_API_KEY");
       return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
     }
 
-    /* -------------------------------
-       Parse body
-    -------------------------------- */
+    /* ---- Parse body ---- */
     let body = req.body;
     if (typeof body === "string") {
       try { body = JSON.parse(body); } catch {}
@@ -110,23 +114,23 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Missing "context"' });
     }
 
-    const lang = (language || "cs").trim().toLowerCase();
+    const lang = (typeof language === "string" ? language : "cs").trim().toLowerCase();
 
-    // Limit input for cost/perf
-    const MAX_INPUT = 8000;
+    /* ---- Input limit ---- */
+    const MAX_INPUT = 7000;
     const ctx = context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
 
+    /* ---- Compose prompts ---- */
     const system = gamePrompt(lang);
     const user = `
-Here is the article text:
+Here is the article text in ${lang}:
 """${ctx}"""
+Generate the required JSON object with exactly 10 question sets.
+`.trim();
 
-Return ONLY the JSON object described in the instructions.
-    `.trim();
-
-    /* -------------------------------
-       OpenAI Call (Responses API)
-    -------------------------------- */
+    /* ---------------------------------------------------------
+       CALL OPENAI GPT-4o-MINI
+    --------------------------------------------------------- */
     const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
@@ -139,90 +143,72 @@ Return ONLY the JSON object described in the instructions.
           { role: "system", content: system },
           { role: "user",   content: user }
         ],
-        max_output_tokens: 600,
-        temperature: 0.5
+        max_output_tokens: 750,
+        temperature: 0.35
       })
     });
 
     const raw = await r.text();
 
     if (!r.ok) {
-      console.error("[GPT-HINTS] OpenAI Error:", r.status, raw.slice(0, 300));
+      console.error("[GPT-HINTS] OpenAI error:", r.status, raw.slice(0, 300));
       return res.status(r.status).json({
         error: "OpenAI error",
-        details: raw.slice(0, 400)
+        raw: raw.slice(0, 500)
       });
     }
 
-    /* -------------------------------------------------------
-       UNIVERSAL PARSER — supports all OpenAI formats
-    ------------------------------------------------------- */
-    let parsed;
+    /* ---------------------------------------------------------
+       PARSE RAW RESPONSE → extract JSON safely
+    --------------------------------------------------------- */
+    let parsed = null;
+
+    // Option 1: try as JSON (if model returned a wrapper)
     try {
-      const json = JSON.parse(raw);
+      const top = JSON.parse(raw);
+      if (top.output_text) parsed = extractJSONObject(top.output_text);
+      else if (Array.isArray(top.output) && top.output[0]?.content)
+        parsed = extractJSONObject(top.output[0].content);
+    } catch (_) {
+      // ignore; move to fallback
+    }
 
-      // Case A: output_text
-      if (json.output_text) {
-        parsed = JSON.parse(json.output_text);
-      }
-      // Case B: output[0].content
-      else if (Array.isArray(json.output) && json.output[0]?.content) {
-        parsed = JSON.parse(json.output[0].content);
-      }
-      // Case C: already-parsed JSON
-      else if (json.questions) {
-        parsed = json;
-      }
-      else {
-        throw new Error("Unexpected OpenAI output format");
-      }
+    // Option 2: extract JSON anywhere in raw text
+    if (!parsed) parsed = extractJSONObject(raw);
 
-    } catch (err) {
-      console.error("[GPT-HINTS] PARSE FAIL:", err, raw.slice(0, 300));
+    if (!parsed) {
+      console.error("[GPT-HINTS] No JSON object found in output.");
       return res.status(500).json({
         error: "Invalid JSON returned by model",
-        raw: raw.slice(0, 200)
+        raw: raw.slice(0, 600)
       });
     }
 
-    /* -------------------------------------------------------
-       Validate Questions
-    ------------------------------------------------------- */
-    if (!parsed?.questions || !Array.isArray(parsed.questions)) {
+    /* ---------------------------------------------------------
+       VALIDATE JSON SHAPE
+    --------------------------------------------------------- */
+    if (!Array.isArray(parsed.questions)) {
       return res.status(500).json({
-        error: "Missing questions[] in response",
-        raw: parsed
+        error: "JSON missing 'questions' array",
+        parsed
       });
     }
 
-    /* -------------------------------------------------------
-       Convert answers → add correctIndex
-    ------------------------------------------------------- */
-    const finalQuestions = parsed.questions.map(set => {
-      const q = set.question || "";
-      const answers = set.answers || [];
-
-      const correctIndex = answers.findIndex(a => a.includes("(ano)"));
-      const cleanAnswers = answers.map(a => a.replace("(ano)", "").trim());
-
-      return {
-        question: q,
-        answers: cleanAnswers,
-        correctIndex: correctIndex === -1 ? 0 : correctIndex
-      };
-    });
-
+    /* ---------------------------------------------------------
+       SUCCESS
+    --------------------------------------------------------- */
     return res.status(200).json({
-      mode: "game",
+      ok: true,
       language: lang,
-      questions: finalQuestions
+      count: parsed.questions.length,
+      questions: parsed.questions
     });
 
   } catch (err) {
-    console.error("[GPT-HINTS] FATAL:", err);
+    console.error("[GPT-HINTS] Fatal:", err);
     return res.status(500).json({
       error: "Internal server error",
-      details: err.toString()
+      details: err?.toString()
     });
   }
 }
