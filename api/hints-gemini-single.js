@@ -1,7 +1,9 @@
 // api/hints-gemini-single.js
-// Single-question generator for Gemini 2.0 Flash-Lite
-// Produces 1 question in strict JSON form
-// Compatible with WikiGame new parallel architecture
+// Gemini version with:
+// - random slice
+// - title filter
+// - numeric similarity filter
+// - strict JSON parsing
 
 export const config = { runtime: "nodejs" };
 
@@ -18,13 +20,45 @@ function setCors(res, origin = "*") {
 }
 
 /* -------------------------------------------------------------
-   Strict JSON question prompt
+   Filters
 ------------------------------------------------------------- */
-function strictJSONPrompt(lang = "cs") {
-  return `
-Vygeneruj PŘESNĚ jednu otázku z dodaného textu.
+function extractNumber(str) {
+  const m = str.match(/-?\d+(?:[\.,]\d+)?/);
+  return m ? parseFloat(m[0].replace(",", ".")) : null;
+}
 
-VÝSTUP MUSÍ BÝT PŘESNÝ JSON:
+function validateAnswers(obj, title) {
+  if (!obj || !Array.isArray(obj.answers)) return false;
+
+  const t = title.toLowerCase();
+
+  for (const ans of obj.answers)
+    if (ans.toLowerCase().includes(t)) return false;
+
+  const nums = obj.answers.map(extractNumber);
+  const correct = nums[obj.correctIndex];
+
+  if (correct !== null) {
+    for (let i = 0; i < nums.length; i++) {
+      if (i === obj.correctIndex) continue;
+      const fake = nums[i];
+      if (fake === null) continue;
+
+      const diff = Math.abs(fake - correct);
+      const rel = diff / Math.max(1, Math.abs(correct));
+
+      if (diff < 10 || rel < 0.10) return false;
+    }
+  }
+  return true;
+}
+
+/* -------------------------------------------------------------
+   Prompt
+------------------------------------------------------------- */
+function strictJSONPrompt(lang, title) {
+  return `
+Vygeneruj PŘESNĚ jednu otázku jako STRICT JSON:
 
 {
   "question": "...",
@@ -33,20 +67,20 @@ VÝSTUP MUSÍ BÝT PŘESNÝ JSON:
 }
 
 PRAVIDLA:
-- Použij JEN fakta z textu.
-- Vyber NE zjevnou informaci — ne něco z prvního odstavce.
-- Vytvoř tři možnosti: 1 správná, 2 věrohodné falešné.
-- Správnou dej na pozici correctIndex.
-- Žádný markdown, žádné komentáře, žádné \`\`\`.
-- Bez úvodů nebo shrnutí.
+- Správná odpověď NIKDY nesmí být název článku: "${title}".
+- Žádná možnost odpovědi nesmí obsahovat název článku.
+- Nepoužívej trivia z prvního odstavce.
+- Pokud je správná odpověď číslo, falešné odpovědi musí být výrazně odlišné.
+  Vyhni se číslům blízkým správné hodnotě (±10 jednotek nebo ±10 %).
+- Tři možnosti, 1 správná, dvě věrohodné.
+- Žádné markdown, žádné komentáře.
 
 Jazyk: ${lang}
-
 `.trim();
 }
 
 /* -------------------------------------------------------------
-   Random slice for variety
+   Random slice
 ------------------------------------------------------------- */
 function pickSlice(full) {
   const len = full.length;
@@ -62,17 +96,14 @@ function pickSlice(full) {
 }
 
 /* -------------------------------------------------------------
-   Strip unwanted wrappers (Gemini likes to wrap JSON in text)
+   JSON extraction from Gemini wrappers
 ------------------------------------------------------------- */
 function extractJSON(text) {
-  let cleaned = text.trim();
-
-  cleaned = cleaned
+  let cleaned = text
     .replace(/```json/gi, "")
     .replace(/```/g, "")
     .trim();
 
-  // find longest {...} block
   const match = cleaned.match(/\{[\s\S]*\}/);
   return match ? match[0] : cleaned;
 }
@@ -101,26 +132,21 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Missing GOOGLE_API_KEY" });
     }
 
-    /* Parse JSON body */
     let body = req.body;
     if (typeof body === "string") {
       try { body = JSON.parse(body); } catch {}
     }
 
-    const { context = "", lang = "cs" } = body;
+    const { context = "", lang = "cs", title = "" } = body;
 
-    if (!context || typeof context !== "string") {
-      return res.status(400).json({ error: 'Missing "context" string' });
+    if (!context) {
+      return res.status(400).json({ error: "Missing context" });
     }
 
-    /* Random slice */
     const chosen = pickSlice(context);
-
-    /* Prompts */
-    const system = strictJSONPrompt(lang);
+    const system = strictJSONPrompt(lang, title);
     const user = `ZDE JE TEXT:\n"""${chosen}"""\nVrať pouze JSON.`;
 
-    /* Gemini API call */
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
 
     const r = await fetch(url, {
@@ -131,21 +157,15 @@ export default async function handler(req, res) {
           { role: "user", parts: [{ text: system }] },
           { role: "user", parts: [{ text: user }] }
         ],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 200
-        }
+        generationConfig: { temperature: 0.7, maxOutputTokens: 200 }
       })
     });
 
-    const raw = await r.json().catch(() => null);
-
-    if (!raw) {
-      return res.status(500).json({ error: "Invalid Gemini response" });
-    }
+    const data = await r.json().catch(() => null);
+    if (!data) return res.status(500).json({ error: "Invalid Gemini response" });
 
     let text =
-      raw?.candidates?.[0]?.content?.parts
+      data?.candidates?.[0]?.content?.parts
         ?.map((p) => p.text)
         .join("")
         ?.trim() || "";
@@ -156,29 +176,16 @@ export default async function handler(req, res) {
     try {
       obj = JSON.parse(text);
     } catch (err) {
-      return res.status(500).json({
-        error: "Invalid JSON returned by Gemini",
-        rawText: text
-      });
+      return res.status(500).json({ error: "Invalid JSON", rawText: text });
     }
 
-    if (
-      !obj ||
-      typeof obj.question !== "string" ||
-      !Array.isArray(obj.answers)
-    ) {
-      return res.status(500).json({
-        error: "Invalid structure from Gemini",
-        parsed: obj
-      });
+    if (!validateAnswers(obj, title)) {
+      return res.status(500).json({ error: "Answer validation failed", obj });
     }
 
     return res.status(200).json(obj);
 
   } catch (e) {
-    return res.status(500).json({
-      error: "Internal error",
-      details: e.toString()
-    });
+    return res.status(500).json({ error: "Internal error", details: e.toString() });
   }
 }
