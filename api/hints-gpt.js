@@ -22,7 +22,7 @@ function setCors(res, origin = "*") {
 ------------------------------------------------------------- */
 function buildPrompt(lang = "cs") {
   return `
-Generate EXACTLY 7 quiz question sets in STRICT JSON format.
+Generate EXACTLY 6 quiz question sets in STRICT JSON format.
 
 LANGUAGE: ${lang}
 
@@ -113,7 +113,7 @@ ARTICLE TEXT:
         "Authorization": `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: "gpt-4o-mini-fast",
         input: [
           { role: "system", content: systemPrompt },
           { role: "user",   content: userPrompt }
