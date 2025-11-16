@@ -22,7 +22,7 @@ Generate EXACTLY 3 quiz question sets from the provided article text.
 
 LANGUAGE RULE:
 - All questions and answers MUST be written strictly in: ${lang.toUpperCase()}
-- Do NOT auto-translate concepts incorrectly; keep terminology accurate for the language.
+- Do NOT mistranslate or invent facts. Stay faithful to the provided article.
 
 FORMAT FOR EACH SET:
 Question?
@@ -30,20 +30,18 @@ a) option A
 b) option B
 c) option C
 
-STRICT REQUIREMENTS:
+STRICT RULES:
 - Exactly 3 sets.
-- Exactly 1 question + exactly 3 answer options (a/b/c) per set.
+- Exactly 1 question + exactly 3 answers per set.
 - Mark the correct answer by adding "(ano)" at the end.
 - Wrong answers must be plausible but incorrect.
-- Questions must be short, factual, and based entirely on the provided text.
-- DO NOT number the sets.
-- DO NOT add explanations, comments, markdown, empty lines or anything else.
-- Keep output plain text.
+- No numbering, no markdown, no empty lines.
+- Output must be plain text only.
 `.trim();
 }
 
 /* -------------------------------------------------------------
-   HANDLER: GPT-4o-mini
+   HANDLER (GPT-4o-mini • chat/completions)
 ------------------------------------------------------------- */
 export default async function handler(req, res) {
   try {
@@ -82,10 +80,10 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Missing "context"' });
     }
 
-    // language fallback = Czech
-    const lang = (typeof language === "string" ? language : "cs").trim().toLowerCase();
+    const lang = (typeof language === "string" ? language : "cs")
+      .trim().toLowerCase();
 
-    // Limit input size
+    // Limit input
     const MAX_INPUT = 5000;
     const ctx = context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
 
@@ -98,9 +96,9 @@ Generate exactly 3 question sets following the strict rules.
     `.trim();
 
     /* ---------------------------------------------------------
-       CALL OPENAI GPT-4o-MINI
+       CALL GPT-4o-mini (correct endpoint)
     --------------------------------------------------------- */
-    const r = await fetch("https://api.openai.com/v1/responses", {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -108,11 +106,11 @@ Generate exactly 3 question sets following the strict rules.
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
-        input: [
+        messages: [
           { role: "system", content: system },
           { role: "user",   content: user }
         ],
-        max_output_tokens: 300,
+        max_tokens: 300,
         temperature: 0.4
       })
     });
@@ -123,14 +121,21 @@ Generate exactly 3 question sets following the strict rules.
       return res.status(r.status).json({ error: "OpenAI error", details: errText });
     }
 
-    const data = await r.json().catch(e => {
-      console.error("[GPT-HINTS] JSON parse fail", e);
+    const data = await r.json().catch(err => {
+      console.error("[GPT-HINTS] JSON parse fail", err);
       return null;
     });
 
-    const text = data?.output_text?.trim() || "";
+    // Extract text properly for GPT-4o-mini
+    const text =
+      data?.choices?.[0]?.message?.content?.trim() ||
+      "";
 
-    return res.status(200).json({ hints: text, mode: "game", language: lang });
+    return res.status(200).json({
+      hints: text,
+      mode: "game",
+      language: lang
+    });
 
   } catch (err) {
     console.error("[GPT-HINTS] fatal", err);
