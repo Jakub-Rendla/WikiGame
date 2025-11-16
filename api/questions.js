@@ -1,38 +1,47 @@
 // api/questions.js
 // Unified WikiGame question generator with Supabase caching.
-// - Cache-first (2–6 ms)
-// - Combined GPT + Gemini fallback
-// - Title filter, numeric filter, answer-in-question filter
-// - Randomized context slicing for diversity
-// - Logs model used: "gpt" | "gemini"
-// - Always returns exactly ONE question
+// CORS + GPT + Gemini + caching + full validation
 
 export const config = { runtime: "nodejs" };
 
 import { createClient } from '@supabase/supabase-js';
 import crypto from "crypto";
 
-// --------------------------------------
-// Supabase client
-// --------------------------------------
+/* ---------------------------------------------------------
+   CORS
+--------------------------------------------------------- */
+function setCors(res, origin = "*") {
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+/* ---------------------------------------------------------
+   Supabase client
+--------------------------------------------------------- */
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY,
   { auth: { persistSession: false } }
 );
 
-// --------------------------------------
-// Helpers
-// --------------------------------------
+/* ---------------------------------------------------------
+   Helpers
+--------------------------------------------------------- */
+
+// hash článku → cache
 function hashArticle(text) {
   return crypto.createHash("sha256").update(text).digest("hex");
 }
 
+// extrakce čísel z odpovědi
 function extractNumber(str) {
   const m = str.match(/-?\d+(?:[\.,]\d+)?/);
   return m ? parseFloat(m[0].replace(",", ".")) : null;
 }
 
+// hash otázky → aby nebyly duplicity
 function hashQuestion(q) {
   const norm = (q.question + "||" + q.answers.join("|"))
     .normalize("NFC")
@@ -43,6 +52,7 @@ function hashQuestion(q) {
   return crypto.createHash("sha256").update(norm).digest("hex");
 }
 
+// náhodný slicing kontextu pro pestrost
 function pickSlice(full) {
   const len = full.length;
   if (len < 3500) return full;
@@ -54,9 +64,9 @@ function pickSlice(full) {
   return full.slice(start, start + sliceLen);
 }
 
-// --------------------------------------
-// Title similarity filter
-// --------------------------------------
+/* ---------------------------------------------------------
+   Title similarity filter
+--------------------------------------------------------- */
 function titleFilterOK(answer, title) {
   if (!title || title.trim().length < 3) return true;
 
@@ -78,9 +88,9 @@ function titleFilterOK(answer, title) {
   return overlap < Math.ceil(titleWords.length * 0.5);
 }
 
-// --------------------------------------
-// Question validations
-// --------------------------------------
+/* ---------------------------------------------------------
+   Question validations
+--------------------------------------------------------- */
 function validateQuestion(obj, title) {
   if (!obj) return false;
   if (!obj.question || !Array.isArray(obj.answers)) return false;
@@ -95,12 +105,12 @@ function validateQuestion(obj, title) {
     if (a.length >= 3 && qLower.includes(a)) return false;
   }
 
-  // title similarity check
+  // title similarity
   for (const ans of obj.answers) {
     if (!titleFilterOK(ans, title)) return false;
   }
 
-  // numeric diversity filter
+  // numeric diversity
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
 
@@ -120,9 +130,9 @@ function validateQuestion(obj, title) {
   return true;
 }
 
-// --------------------------------------
-// GPT generator
-// --------------------------------------
+/* ---------------------------------------------------------
+   GPT generator
+--------------------------------------------------------- */
 async function generateViaGPT(context, lang, title) {
   const sys = `
 Generate ONE quiz question in JSON:
@@ -168,9 +178,9 @@ Rules:
   catch { return null; }
 }
 
-// --------------------------------------
-// Gemini generator
-// --------------------------------------
+/* ---------------------------------------------------------
+   Gemini generator
+--------------------------------------------------------- */
 function extractJSON(text) {
   if (!text) return null;
   let t = text
@@ -202,7 +212,8 @@ Požadavky:
 
   const user = `Zde je text článku:\n"""${pickSlice(context)}"""\nVrať pouze JSON.`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${process.env.GOOGLE_API_KEY}`;
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${process.env.GOOGLE_API_KEY}`;
 
   const r = await fetch(url, {
     method: "POST",
@@ -227,10 +238,17 @@ Požadavky:
   catch { return null; }
 }
 
-// --------------------------------------
-// MAIN HANDLER
-// --------------------------------------
+/* ---------------------------------------------------------
+   MAIN HANDLER
+--------------------------------------------------------- */
 export default async function handler(req, res) {
+  const origin = req.headers?.origin || "*";
+  setCors(res, origin);
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
   try {
     if (req.method !== "POST") {
       return res.status(200).json({ ok: true });
@@ -241,7 +259,9 @@ export default async function handler(req, res) {
 
     const article_hash = hashArticle(context);
 
-    // ---------- 1) Check cache ----------
+    /* -----------------------------------------------------
+       1) CACHE READ
+    ----------------------------------------------------- */
     const cached = await supabase
       .from("wiki_questions")
       .select("*")
@@ -259,28 +279,33 @@ export default async function handler(req, res) {
       });
     }
 
-    // Need more questions (cache miss)
+    /* -----------------------------------------------------
+       2) CACHE MISS → GENERATE MORE
+    ----------------------------------------------------- */
     const missing = 12 - (cached.data?.length || 0);
     let generated = [];
 
     for (let i = 0; i < missing; i++) {
-      const viaGPT = await generateViaGPT(context, lang, title);
+      const viaGPT    = await generateViaGPT(context, lang, title);
       const viaGemini = await generateViaGemini(context, lang, title);
-      const cand = viaGPT || viaGemini;
+      const cand      = viaGPT || viaGemini;
 
       if (cand && validateQuestion(cand, title)) {
-        const qh = hashQuestion(cand);
 
-        const { error: insertError } = await supabase.from("wiki_questions").insert([{
-          article_hash,
-          lang,
-          question: cand.question,
-          answers: cand.answers,
-          correct_index: cand.correctIndex,
-          question_hash: qh,
-          model_text: viaGPT ? "gpt" : "gemini",
-          is_removed: false
-        }]);
+        const qHash = hashQuestion(cand);
+
+        const { error: insertError } = await supabase
+          .from("wiki_questions")
+          .insert([{
+            article_hash,
+            lang,
+            question: cand.question,
+            answers: cand.answers,
+            correct_index: cand.correctIndex,
+            question_hash: qHash,
+            model_text: viaGPT ? "gpt" : "gemini",
+            is_removed: false
+          }]);
 
         if (insertError) {
           console.error("[questions] INSERT ERROR:", insertError);
@@ -290,6 +315,9 @@ export default async function handler(req, res) {
       }
     }
 
+    /* -----------------------------------------------------
+       3) RETURN ANY VALID QUESTION
+    ----------------------------------------------------- */
     const pool = [...(cached.data || []), ...generated];
     if (!pool.length) {
       return res.status(500).json({ error: "No valid questions generated" });
