@@ -1,8 +1,10 @@
 // api/hints-gpt-single.js
 // Ultra-fast single-question generator for WikiGame
-// Requires: OPENAI_API_KEY
+// Random text slicing + higher temperature = more variety
 
 export const config = { runtime: "nodejs" };
+
+import crypto from "crypto";
 
 /* -------------------------------------------------------------
    CORS
@@ -11,14 +13,11 @@ function setCors(res, origin = "*") {
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization"
-  );
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 /* -------------------------------------------------------------
-   Build the super-optimized prompt
+   Build prompt
 ------------------------------------------------------------- */
 function buildPrompt(lang = "cs") {
   return `
@@ -28,25 +27,44 @@ LANGUAGE: ${lang}
 
 RULES:
 - Use ONLY the supplied article text.
-- Do NOT use general knowledge unless explicitly in the article.
-- The question must be factual, unambiguous, and specific.
+- The question must be meaningful and based on non-trivial details.
+- Avoid obvious or superficial facts from first sentences.
 - Provide EXACTLY 3 answers: 1 correct, 2 plausible but wrong.
-- Answers must be short (max 80 characters).
-- Avoid repeating previously asked topics (cannot be enforced here—just ignore this rule if unclear).
-- Avoid trick questions with nearly identical numeric values.
-- Do NOT invent details not found in the text.
+- Keep answers under 80 characters.
+- Avoid nearly identical numeric answers.
+- Avoid overly generic or universally true statements.
+- No invented details.
 
 OUTPUT STRICT JSON:
 {
   "question": "...",
-  "answers": ["A", "B", "C"],
+  "answers": ["A","B","C"],
   "correctIndex": 1
 }
 
 NO markdown.
 NO extra text.
-NO comments.
+NO commentary.
   `.trim();
+}
+
+/* -------------------------------------------------------------
+   Pick random text slice for variety
+------------------------------------------------------------- */
+function pickSlice(full) {
+  const len = full.length;
+
+  // If short, return full
+  if (len < 4000) return full;
+
+  // 50% full, 50% slice
+  if (Math.random() < 0.5) return full;
+
+  const sliceLen = 3200 + Math.floor(Math.random() * 400); // 3200–3600 chars
+  const maxStart = Math.max(0, len - sliceLen);
+  const start = Math.floor(Math.random() * maxStart);
+
+  return full.slice(start, start + sliceLen);
 }
 
 /* -------------------------------------------------------------
@@ -67,19 +85,16 @@ export default async function handler(req, res) {
 
   setCors(res, origin);
 
+  // Check API key
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
   }
 
-  // Parse body
+  // Parse JSON body
   let body = req.body;
   if (typeof body === "string") {
     try { body = JSON.parse(body); } catch {}
-  }
-
-  if (!body || typeof body !== "object") {
-    return res.status(400).json({ error: "Invalid JSON body" });
   }
 
   const { lang = "cs", context = "" } = body;
@@ -88,12 +103,15 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing context" });
   }
 
-  /* Prepare prompt */
+  /* Prepare prompts */
   const systemPrompt = buildPrompt(lang);
+
+  // Pick random portion of the article
+  const chosenText = pickSlice(context);
 
   const userPrompt = `
 ARTICLE TEXT:
-"""${context.slice(0, 9000)}"""
+"""${chosenText}"""
   `.trim();
 
   /* ---------------------------------------------------------
@@ -114,7 +132,7 @@ ARTICLE TEXT:
           { role: "user", content: userPrompt }
         ],
         max_output_tokens: 180,
-        temperature: 0.35
+        temperature: 0.60
       })
     });
   } catch (err) {
@@ -132,9 +150,6 @@ ARTICLE TEXT:
     });
   }
 
-  /* ---------------------------------------------------------
-     CATCH explicit OpenAI error object
-  --------------------------------------------------------- */
   if (raw.error) {
     return res.status(500).json({
       error: "OpenAI model error",
@@ -142,14 +157,9 @@ ARTICLE TEXT:
     });
   }
 
-  /* ---------------------------------------------------------
-     EXTRACT TEXT — Responses API new shape
-  --------------------------------------------------------- */
+  /* Extract text */
   let text = null;
-
-  try {
-    text = raw.output?.[0]?.content?.[0]?.text;
-  } catch {}
+  try { text = raw.output?.[0]?.content?.[0]?.text; } catch {}
 
   if (!text) {
     return res.status(500).json({
@@ -158,9 +168,7 @@ ARTICLE TEXT:
     });
   }
 
-  /* ---------------------------------------------------------
-     PARSE JSON
-  --------------------------------------------------------- */
+  /* Parse JSON */
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -173,7 +181,7 @@ ARTICLE TEXT:
 
   if (!parsed || !Array.isArray(parsed.answers)) {
     return res.status(500).json({
-      error: "Invalid structure (answers array missing)",
+      error: "Invalid structure (answers missing)",
       parsed
     });
   }
