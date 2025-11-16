@@ -16,7 +16,7 @@ function setCors(res, origin="*") {
 ------------------------------------------------------------- */
 function buildPrompt(lang="cs") {
   return `
-Generate EXACTLY 10 quiz question sets in JSON format.
+Generate EXACTLY 7 quiz question sets in JSON format.
 
 LANGUAGE: ${lang}
 
