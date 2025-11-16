@@ -35,8 +35,11 @@ STRICT RULES:
 - Exactly 1 question + exactly 3 answers per set.
 - Mark the correct answer by adding "(ano)" at the end.
 - Wrong answers must be plausible but incorrect.
-- No numbering, no markdown, no empty lines.
-- Output must be plain text only.
+- Questions must be short, factual, and based entirely on the provided text.
+- DO NOT include phrases like “podle článku”, “v textu se píše”, “v uvedeném kontextu”, or any meta-references to the article.
+- Questions must sound natural as standalone trivia questions.
+- NO numbering, markdown, comments, empty lines, explanations, summaries.
+- Output MUST be plain text only.
 `.trim();
 }
 
@@ -80,6 +83,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Missing "context"' });
     }
 
+    // language fallback = Czech
     const lang = (typeof language === "string" ? language : "cs")
       .trim().toLowerCase();
 
@@ -92,7 +96,7 @@ export default async function handler(req, res) {
 Text of the article in ${lang}:
 """${ctx}"""
 
-Generate exactly 3 question sets following the strict rules.
+Generate exactly 3 question sets following all strict rules.
     `.trim();
 
     /* ---------------------------------------------------------
