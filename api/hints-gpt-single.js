@@ -1,19 +1,14 @@
 // api/hints-gpt-single.js
-// Single-question generator for GPT-4o-mini
+// GPT-4o-mini single question generator
+// - title-aware
+// - numeric filter
+// - answer-in-question filter
 // - random slice
 // - strict JSON
-// - title filter (safe)
-// - numeric similarity filter
-// - answer-in-question filter
 // - robust validation
 
 export const config = { runtime: "nodejs" };
 
-import crypto from "crypto";
-
-/* -------------------------------------------------------------
-   CORS
-------------------------------------------------------------- */
 function setCors(res, origin = "*") {
   res.setHeader("Access-Control-Allow-Origin", origin || "*");
   res.setHeader("Vary", "Origin");
@@ -22,33 +17,62 @@ function setCors(res, origin = "*") {
 }
 
 /* -------------------------------------------------------------
-   Helpers: numeric + title + answer-in-question validation
+   Helpers
 ------------------------------------------------------------- */
 function extractNumber(str) {
   const m = str.match(/-?\d+(?:[\.,]\d+)?/);
   return m ? parseFloat(m[0].replace(",", ".")) : null;
 }
 
+/* -------------------------------------------------------------
+   Title-aware validation
+------------------------------------------------------------- */
+function validateTitleFilter(answer, title) {
+  if (!title || title.trim().length < 3) return true;
+
+  const a = answer.toLowerCase().trim();
+  const t = title.toLowerCase().trim();
+
+  // exact match
+  if (a === t) return false;
+
+  // split into words
+  const titleWords = t.split(/\s+/).filter(w => w.length >= 3);
+  const ansWords = a.split(/\s+/);
+
+  if (!titleWords.length) return true;
+
+  let overlap = 0;
+  for (const tw of titleWords) {
+    for (const aw of ansWords) {
+      if (aw === tw) overlap++;
+    }
+  }
+
+  // ≥50% overlap = too similar
+  return overlap < Math.ceil(titleWords.length * 0.5);
+}
+
+/* -------------------------------------------------------------
+   Global validation
+------------------------------------------------------------- */
 function validateAnswers(obj, title) {
   if (!obj || !Array.isArray(obj.answers)) return false;
 
   const qLower = obj.question.toLowerCase();
 
-  /* ANSWER-IN-QUESTION FILTER */
+  // Answer-in-question filter
   for (const ans of obj.answers) {
     const a = ans.toLowerCase().trim();
     if (a.length >= 3 && qLower.includes(a)) return false;
   }
 
-  /* TITLE FILTER — only if title exists and >=3 chars */
-  if (title && title.trim().length >= 3) {
-    const t = title.trim().toLowerCase();
-    for (const ans of obj.answers) {
-      if (ans.toLowerCase().includes(t)) return false;
-    }
+  // Title filter ONLY on answers
+  for (const ans of obj.answers) {
+    if (!validateTitleFilter(ans, title)) return false;
   }
 
-  /* NUMERIC SIMILARITY FILTER */
+  // Numeric similarity
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
 
@@ -82,16 +106,13 @@ Generate ONE quiz question in STRICT JSON:
 }
 
 RULES:
-- Use ONLY the article text.
-- Avoid trivial facts from the first sentences.
-- Never include the correct answer or its key parts directly in the question.
-- The correct answer must NOT be the article title: "${title}".
-- No answer may contain the article title (unless empty).
-- If the answer is numeric, fake answers must be very different
-  (avoid values within ±10 units or ±10%).
-- Answers must be short, factual, plausible.
-- No markdown, no commentary.
+- Use ONLY article text.
+- Never reveal the correct answer inside the question.
+- The correct answer must NOT be exactly the article title: "${title}".
+- Answers must NOT contain the article title or be too similar to it.
+- If the answer is numeric, fake answers must differ strongly (±10 or ±10%).
 - Language: ${lang}
+- No markdown.
 `.trim();
 }
 
@@ -111,7 +132,7 @@ function pickSlice(full) {
 }
 
 /* -------------------------------------------------------------
-   HANDLER
+   Handler
 ------------------------------------------------------------- */
 export default async function handler(req, res) {
   try {
@@ -133,19 +154,16 @@ export default async function handler(req, res) {
     if (!apiKey) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
 
     let body = req.body;
-    if (typeof body === "string") {
-      try { body = JSON.parse(body); } catch {}
-    }
+    if (typeof body === "string") try { body = JSON.parse(body); } catch {}
 
     const { context = "", lang = "cs", title = "" } = body;
     if (!context) return res.status(400).json({ error: "Missing context" });
 
     const chosen = pickSlice(context);
     const systemPrompt = buildPrompt(lang, title);
-
     const userPrompt = `ARTICLE TEXT:\n"""${chosen}"""`;
 
-    const response = await fetch("https://api.openai.com/v1/responses", {
+    const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -162,7 +180,7 @@ export default async function handler(req, res) {
       })
     });
 
-    const raw = await response.json().catch(() => null);
+    const raw = await r.json().catch(() => null);
     if (!raw) return res.status(500).json({ error: "Invalid OpenAI response" });
     if (raw.error) return res.status(500).json({ error: raw.error });
 
@@ -179,7 +197,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json(obj);
 
-  } catch (err) {
-    return res.status(500).json({ error: "Fatal", details: err.toString() });
+  } catch (e) {
+    return res.status(500).json({ error: "Fatal", details: e.toString() });
   }
 }
