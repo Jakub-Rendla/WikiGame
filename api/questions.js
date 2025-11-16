@@ -271,15 +271,20 @@ export default async function handler(req, res) {
       if (cand && validateQuestion(cand, title)) {
         const qh = hashQuestion(cand);
 
-        await supabase.from("wiki_questions").insert([{
+        const { error: insertError } = await supabase.from("wiki_questions").insert([{
           article_hash,
           lang,
           question: cand.question,
           answers: cand.answers,
           correct_index: cand.correctIndex,
           question_hash: qh,
-          model: viaGPT ? "gpt" : "gemini"
+          model_text: viaGPT ? "gpt" : "gemini",
+          is_removed: false
         }]);
+
+        if (insertError) {
+          console.error("[questions] INSERT ERROR:", insertError);
+        }
 
         generated.push(cand);
       }
@@ -299,6 +304,7 @@ export default async function handler(req, res) {
     });
 
   } catch (err) {
+    console.error("[questions] FATAL:", err);
     return res.status(500).json({ error: err.toString() });
   }
 }
