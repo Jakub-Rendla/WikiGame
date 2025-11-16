@@ -1,9 +1,9 @@
 // api/hints-gemini-single.js
-// Gemini version with:
+// Gemini Flash-Lite single-question generator
 // - random slice
-// - title filter
-// - numeric similarity filter
-// - strict JSON parsing
+// - title filter (safe)
+// - numeric filter
+// - strict JSON extract
 
 export const config = { runtime: "nodejs" };
 
@@ -30,11 +30,15 @@ function extractNumber(str) {
 function validateAnswers(obj, title) {
   if (!obj || !Array.isArray(obj.answers)) return false;
 
-  const t = title.toLowerCase();
+  // TITLE FILTER — only if title exists
+  if (title && title.trim().length >= 3) {
+    const t = title.trim().toLowerCase();
+    for (const ans of obj.answers) {
+      if (ans.toLowerCase().includes(t)) return false;
+    }
+  }
 
-  for (const ans of obj.answers)
-    if (ans.toLowerCase().includes(t)) return false;
-
+  // NUMERIC SIMILARITY FILTER
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
 
@@ -50,6 +54,7 @@ function validateAnswers(obj, title) {
       if (diff < 10 || rel < 0.10) return false;
     }
   }
+
   return true;
 }
 
@@ -58,7 +63,7 @@ function validateAnswers(obj, title) {
 ------------------------------------------------------------- */
 function strictJSONPrompt(lang, title) {
   return `
-Vygeneruj PŘESNĚ jednu otázku jako STRICT JSON:
+Vygeneruj PŘESNĚ jednu otázku jako JSON:
 
 {
   "question": "...",
@@ -67,15 +72,11 @@ Vygeneruj PŘESNĚ jednu otázku jako STRICT JSON:
 }
 
 PRAVIDLA:
-- Správná odpověď NIKDY nesmí být název článku: "${title}".
-- Žádná možnost odpovědi nesmí obsahovat název článku.
-- Nepoužívej trivia z prvního odstavce.
-- Pokud je správná odpověď číslo, falešné odpovědi musí být výrazně odlišné.
-  Vyhni se číslům blízkým správné hodnotě (±10 jednotek nebo ±10 %).
-- Tři možnosti, 1 správná, dvě věrohodné.
-- Žádné markdown, žádné komentáře.
-
-Jazyk: ${lang}
+- Správná odpověď nesmí být název článku: "${title}".
+- Žádná odpověď nesmí obsahovat název článku.
+- Pokud je odpověď číslo, falešné musí být výrazně jiné.
+- Bez markdownu, bez komentářů.
+- Jazyk: ${lang}
 `.trim();
 }
 
@@ -91,12 +92,11 @@ function pickSlice(full) {
   const sliceLen = 3000 + Math.floor(Math.random() * 600);
   const maxStart = Math.max(0, len - sliceLen);
   const start = Math.floor(Math.random() * maxStart);
-
   return full.slice(start, start + sliceLen);
 }
 
 /* -------------------------------------------------------------
-   JSON extraction from Gemini wrappers
+   Gemini JSON cleanup
 ------------------------------------------------------------- */
 function extractJSON(text) {
   let cleaned = text
@@ -128,9 +128,7 @@ export default async function handler(req, res) {
     setCors(res, origin);
 
     const apiKey = process.env.GOOGLE_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "Missing GOOGLE_API_KEY" });
-    }
+    if (!apiKey) return res.status(500).json({ error: "Missing GOOGLE_API_KEY" });
 
     let body = req.body;
     if (typeof body === "string") {
@@ -138,14 +136,11 @@ export default async function handler(req, res) {
     }
 
     const { context = "", lang = "cs", title = "" } = body;
-
-    if (!context) {
-      return res.status(400).json({ error: "Missing context" });
-    }
+    if (!context) return res.status(400).json({ error: "Missing context" });
 
     const chosen = pickSlice(context);
     const system = strictJSONPrompt(lang, title);
-    const user = `ZDE JE TEXT:\n"""${chosen}"""\nVrať pouze JSON.`;
+    const user = `Zde je text článku:\n"""${chosen}"""\nVrať pouze JSON.`;
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
 
@@ -173,11 +168,8 @@ export default async function handler(req, res) {
     text = extractJSON(text);
 
     let obj;
-    try {
-      obj = JSON.parse(text);
-    } catch (err) {
-      return res.status(500).json({ error: "Invalid JSON", rawText: text });
-    }
+    try { obj = JSON.parse(text); }
+    catch { return res.status(500).json({ error: "Invalid JSON", rawText: text }); }
 
     if (!validateAnswers(obj, title)) {
       return res.status(500).json({ error: "Answer validation failed", obj });
