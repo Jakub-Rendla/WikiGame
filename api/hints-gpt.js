@@ -1,5 +1,6 @@
 // api/hints-gpt.js
-// GPT-4o-mini quiz generator (10 sets → JSON)
+// GPT-4o-mini quiz generator (7 sets → JSON)
+// Ready for multilingual Webflow integration
 // Required: OPENAI_API_KEY
 
 export const config = { runtime: "nodejs" };
@@ -16,19 +17,22 @@ function setCors(res, origin="*") {
 ------------------------------------------------------------- */
 function buildPrompt(lang="cs") {
   return `
-Generate EXACTLY 7 quiz question sets in JSON format.
+Generate EXACTLY 7 quiz question sets in STRICT JSON format.
 
 LANGUAGE: ${lang}
 
-REQUIREMENTS:
-- Each question must be based ONLY on the provided article.
-- No generic background knowledge unless present in article.
-- Focus on specific factual details, not broad or universal facts.
-- Avoid trick questions with too similar numeric values.
+RULES:
+- Use ONLY facts visible in the provided article text.
+- Do NOT invent unrelated global facts.
+- Avoid questions with confusingly similar numeric options.
+- Avoid overly broad or general questions.
 - Avoid repeating question topics.
-- Avoid questions unrelated to the article's theme.
+- Make questions factual, specific, clear.
+- Answers must be short.
+- Provide exactly 3 answer options.
+- Only ONE correct answer.
 
-OUTPUT STRICTLY AS VALID JSON:
+OUTPUT FORMAT (STRICT):
 
 {
   "questions": [
@@ -41,7 +45,7 @@ OUTPUT STRICTLY AS VALID JSON:
   ]
 }
 
-NO extra text, no explanation, no markdown.
+DO NOT add commentary, markdown, quotes, or text outside JSON.
 `.trim();
 }
 
@@ -84,11 +88,10 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing context" });
   }
 
-  /* Prepare prompt */
+  /* --------------------- PROMPTS ---------------------- */
   const systemPrompt = buildPrompt(lang);
-
   const userPrompt = `
-ARTICLE TEXT (keep only essential meaning):
+ARTICLE TEXT:
 """${context.slice(0, 9000)}"""
 `.trim();
 
@@ -104,7 +107,7 @@ ARTICLE TEXT (keep only essential meaning):
         "Authorization": `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini-2024-07-18-fast",
+        model: "gpt-4o-mini-2024-07-18-fast", // can switch to non-fast if needed
         input: [
           { role:"system", content: systemPrompt },
           { role:"user",   content: userPrompt }
@@ -114,28 +117,59 @@ ARTICLE TEXT (keep only essential meaning):
       })
     });
   } catch (err) {
-    return res.status(500).json({ error: "Connection to OpenAI failed", details: err });
+    return res.status(500).json({
+      error: "Connection to OpenAI failed",
+      details: err.toString()
+    });
   }
 
-  const raw = await response.json().catch(()=>null);
+  const raw = await response.json().catch(() => null);
 
   if (!raw) {
     return res.status(500).json({ error: "Invalid OpenAI response" });
   }
 
   /* ---------------------------------------------------------
-     EXTRACT JSON FROM output[0].content[0].text
+     ROBUST OUTPUT EXTRACTION (covers all OpenAI formats)
   --------------------------------------------------------- */
-  let text;
-  try {
-    text = raw.output?.[0]?.content?.[0]?.text;
-  } catch {}
 
-  if (!text) {
-    return res.status(500).json({ error: "Model did not return output_text", raw });
+  let text = null;
+
+  try {
+    // Format A: modern → output[0].content[].text (most common)
+    const content = raw.output?.[0]?.content;
+    if (Array.isArray(content)) {
+      const found = content.find(c => c.type === "output_text");
+      if (found?.text) text = found.text;
+    }
+
+    // Format B: fallback → raw.output_text
+    if (!text && typeof raw.output_text === "string") {
+      text = raw.output_text;
+    }
+
+    // Format C: legacy → raw.output[0].content[0].text
+    if (!text && raw.output?.[0]?.content?.[0]?.text) {
+      text = raw.output[0].content[0].text;
+    }
+
+  } catch (err) {
+    return res.status(500).json({
+      error: "Error extracting text from model",
+      raw
+    });
   }
 
-  /* Parse JSON */
+  if (!text) {
+    return res.status(500).json({
+      error: "Model did not return usable text",
+      raw
+    });
+  }
+
+  /* ---------------------------------------------------------
+     PARSE JSON SAFELY
+  --------------------------------------------------------- */
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -148,12 +182,12 @@ ARTICLE TEXT (keep only essential meaning):
 
   if (!parsed || !Array.isArray(parsed.questions)) {
     return res.status(500).json({
-      error: "`questions` array missing in returned JSON",
+      error: "`questions` array missing in JSON",
       parsed
     });
   }
 
-  /* SUCCESS */
+  /* ---------------------- SUCCESS ---------------------- */
   return res.status(200).json({
     questions: parsed.questions,
     count: parsed.questions.length,
