@@ -104,12 +104,12 @@ ARTICLE TEXT (keep only essential meaning):
         "Authorization": `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini-2024-07-18",
+        model: "gpt-4o-mini-2024-07-18-fast",
         input: [
           { role:"system", content: systemPrompt },
           { role:"user",   content: userPrompt }
         ],
-        max_output_tokens: 900,
+        max_output_tokens: 500,
         temperature: 0.35
       })
     });
