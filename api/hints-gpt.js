@@ -113,7 +113,7 @@ ARTICLE TEXT:
         "Authorization": `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini-2024-07-18-fast",
+        model: "gpt-4o-mini-2024-07-18",
         input: [
           { role: "system", content: systemPrompt },
           { role: "user",   content: userPrompt }
