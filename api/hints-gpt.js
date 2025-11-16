@@ -1,5 +1,5 @@
 // api/hints-gpt.js
-// GPT-4o-mini → 10 question sets → clean JSON → stable output
+// GPT-4o-mini → 10 quiz sets → JSON output → Topic-focused questions
 
 export const config = { runtime: "nodejs" };
 
@@ -11,19 +11,19 @@ function setCors(res, origin = "*") {
 }
 
 /* -------------------------------------------------------------
-   MULTILINGUAL GAME PROMPT (JSON OUTPUT)
+   MULTILINGUAL + TOPIC-FOCUSED GAME PROMPT (STRICT JSON)
 ------------------------------------------------------------- */
 function gamePrompt(language = "cs") {
   const lang = language.trim().toLowerCase();
 
   return `
-Generate **exactly 10** quiz question sets from the provided article text.
+You generate quiz questions **strictly based on the provided article**.
 
 LANGUAGE:
 - All output MUST be written strictly in: ${lang.toUpperCase()}.
 
-OUTPUT FORMAT:
-Return ONLY valid JSON in this format:
+OUTPUT FORMAT (VERY STRICT):
+Return ONLY valid JSON in this exact structure:
 
 {
   "questions": [
@@ -33,20 +33,49 @@ Return ONLY valid JSON in this format:
       "correctIndex": 0
     },
     ...
-    (10 items)
+    (10 items total)
   ]
 }
 
-RULES:
-- Exactly 10 items in "questions" array — no more, no less.
-- Each item must contain:
-    • "question" (short factual question)
-    • "answers": array of 3 strings
-    • "correctIndex": index of correct answer (0/1/2)
-- Wrong answers must be plausible but incorrect.
-- NO explanations, NO markdown, NO commentary.
-- JSON must be valid, no trailing commas.
-- Questions MUST be based ONLY on provided article text.
+NO extra text. No markdown. No commentary. No trailing commas.
+
+
+======================================================
+   RULES ABOUT QUESTION RELEVANCE (VERY IMPORTANT)
+======================================================
+
+1) **Questions must be ONLY about specific facts in the article.**
+   - Questions must be directly tied to the main subject of the article.
+   - Use only concrete facts explicitly found in the article text.
+
+2) **NEVER generate questions about general concepts** that appear only incidentally.
+   Forbidden examples:
+     - generic history / geology / biology
+     - definitions (e.g. "What is history?")
+     - general periods (e.g. "What is the Early Modern Age?")
+     - general language or science questions
+     - anything that could fit ANY article
+
+3) **Avoid vague or overly broad questions.**
+   - Prefer specific events, names, dates, terms, locations, facts.
+   - Prefer concrete details over abstractions.
+
+4) **Questions must be diverse.**
+   - Avoid repeating similar patterns.
+   - Each question should touch a different specific aspect of the article.
+
+5) **Answers must be plausible.**
+   - Wrong answers must be believable, not random.
+
+6) **Correct answer must be 100% extractable from the article.**
+   - No guessing.
+   - No outside knowledge unless it's extremely basic background required for clarity.
+
+7) **You MUST produce exactly 10 question objects.**
+
+======================================================
+
+Now generate the JSON.
 `.trim();
 }
 
@@ -60,7 +89,6 @@ export default async function handler(req, res) {
       setCors(res, origin);
       return res.status(204).end();
     }
-
     if (req.method !== "POST") {
       setCors(res, origin);
       return res.status(200).json({ ok: true, info: "Use POST" });
@@ -78,7 +106,7 @@ export default async function handler(req, res) {
     }
 
     /* ----------------------------------------------
-       BODY PARSING
+       BODY
     ---------------------------------------------- */
     let body = req.body;
     if (typeof body === "string") {
@@ -99,17 +127,17 @@ export default async function handler(req, res) {
       .trim()
       .toLowerCase();
 
-    const MAX_INPUT = 5000;
-    const ctx =
-      context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
+    // Trim input for speed
+    const MAX_INPUT = 7000;
+    const ctx = context.length > MAX_INPUT ? context.slice(0, MAX_INPUT) : context;
 
     const system = gamePrompt(lang);
 
     const user = `
-Text v jazyce ${lang}:
+Text článku v jazyce ${lang}:
 """${ctx}"""
 
-GENERUJ JSON (10 otázek).
+Vrať pouze JSON podle přísného formátu výše.
     `.trim();
 
     /* ----------------------------------------------
@@ -118,7 +146,7 @@ GENERUJ JSON (10 otázek).
     const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${apiKey}`,
+        "Authorization": \`Bearer \${apiKey}\`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
@@ -127,19 +155,19 @@ GENERUJ JSON (10 otázek).
           { role: "system", content: system },
           { role: "user",   content: user }
         ],
-        temperature: 0.35,
-        max_output_tokens: 750
+        temperature: 0.4,
+        max_output_tokens: 800
       })
     });
 
     if (!r.ok) {
-      const errText = await r.text().catch(() => "");
-      console.error("[GPT-HINTS] OpenAI error:", r.status, errText);
-      return res.status(r.status).json({ error: "OpenAI error", details: errText });
+      const errorTxt = await r.text().catch(() => "");
+      console.error("[GPT-HINTS] OpenAI error:", r.status, errorTxt);
+      return res.status(r.status).json({ error: "OpenAI error", details: errorTxt });
     }
 
     const data = await r.json().catch(e => {
-      console.error("[GPT-HINTS] FAILED JSON:", e);
+      console.error("[GPT-HINTS] OpenAI JSON parse fail", e);
       return null;
     });
 
@@ -152,12 +180,12 @@ GENERUJ JSON (10 otázek).
       "";
 
     if (!rawText) {
-      console.error("[GPT-HINTS] Empty model output:", data);
-      return res.status(200).json({ error: "Empty output", raw: data });
+      console.error("[GPT-HINTS] Model returned empty output", data);
+      return res.status(200).json({ error: "empty_output", raw: data });
     }
 
     /* ----------------------------------------------
-       PARSE JSON (INSIDE TEXT)
+       PARSE JSON INSIDE RAW
     ---------------------------------------------- */
     let parsed;
     try {
@@ -171,18 +199,22 @@ GENERUJ JSON (10 otázek).
     }
 
     /* ----------------------------------------------
-       VALIDATE STRUCTURE
+       VALIDATE
     ---------------------------------------------- */
-    if (!parsed || !parsed.questions || !Array.isArray(parsed.questions)) {
-      console.error("[GPT-HINTS] JSON missing 'questions':", parsed);
+    if (!parsed.questions || !Array.isArray(parsed.questions)) {
+      console.error("[GPT-HINTS] JSON missing questions[]:", parsed);
       return res.status(200).json({
-        error: "JSON missing 'questions' array",
+        error: "missing_questions_array",
         parsed
       });
     }
 
+    if (parsed.questions.length !== 10) {
+      console.warn("[GPT-HINTS] Wrong number of questions:", parsed.questions.length);
+    }
+
     /* ----------------------------------------------
-       OK — return for Webflow
+       OUTPUT FOR WEBFLOW
     ---------------------------------------------- */
     return res.status(200).json({
       sets: parsed.questions,
@@ -191,9 +223,9 @@ GENERUJ JSON (10 otázek).
     });
 
   } catch (err) {
-    console.error("[GPT-HINTS] Fatal error:", err);
+    console.error("[GPT-HINTS] Fatal:", err);
     return res.status(500).json({
-      error: "internal_server_error",
+      error: "fatal",
       details: err.toString()
     });
   }
