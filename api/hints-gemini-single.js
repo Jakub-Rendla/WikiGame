@@ -1,10 +1,10 @@
 // api/hints-gemini-single.js
-// Gemini Flash Lite — FINAL STABLE VERSION
-// - few-shots (2 GOOD + 1 BAD)
-// - softened validation
+// Gemini Flash Lite — BALANCED VERSION
+// - nodejs runtime
+// - few-shot (1 GOOD + 1 BAD)
+// - softened rules
 // - robust JSON extraction
-// - strict JSON output
-// - stable prompt
+// - highly stable for Flash Lite
 
 export const config = { runtime: "nodejs" };
 
@@ -21,15 +21,15 @@ function setCors(res) {
    Helpers
 ------------------------------------------------------------- */
 function extractNumber(str) {
-  const m = str.match(/-?\d+(?:[.,]\d+)?/);
+  const m = str?.match?.(/-?\d+(?:[.,]\d+)?/);
   return m ? parseFloat(m[0].replace(",", ".")) : null;
 }
 
 function validateTitleFilter(answer, title) {
   if (!title || title.trim().length < 3) return true;
+
   const a = answer.toLowerCase();
   const t = title.toLowerCase();
-
   if (a === t) return false;
 
   const titleWords = t.split(/\s+/).filter(w => w.length >= 3);
@@ -40,7 +40,7 @@ function validateTitleFilter(answer, title) {
     if (ansWords.includes(tw)) overlap++;
   }
 
-  return overlap < Math.ceil(titleWords.length * 0.3);
+  return overlap < Math.ceil(titleWords.length * 0.15);
 }
 
 function validateAnswers(obj, title) {
@@ -54,20 +54,20 @@ function validateAnswers(obj, title) {
     if (!validateTitleFilter(ans, title)) return false;
   }
 
+  // Balanced numeric threshold
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
 
   if (correct !== null) {
     for (let i = 0; i < nums.length; i++) {
       if (i === obj.correctIndex) continue;
-
       const fake = nums[i];
       if (fake === null) continue;
 
       const diff = Math.abs(fake - correct);
       const rel = diff / Math.max(1, Math.abs(correct));
 
-      if (diff < 5 || rel < 0.05) return false;
+      if (diff < 3 && rel < 0.03) return false;
     }
   }
 
@@ -75,11 +75,11 @@ function validateAnswers(obj, title) {
 }
 
 /* -------------------------------------------------------------
-   Prompt (SAFE FEW SHOTS)
+   Balanced Prompt
 ------------------------------------------------------------- */
 function buildGeminiPrompt(lang, title) {
   return `
-Vygeneruj přesně 1 otázku jako STRICT JSON:
+Vygeneruj přesně 1 otázku jako JSON:
 
 {
   "question": "...",
@@ -87,29 +87,21 @@ Vygeneruj přesně 1 otázku jako STRICT JSON:
   "correctIndex": 0
 }
 
-GOOD PŘÍKLADY:
-1)
+GOOD PŘÍKLAD:
 {
-  "question": "Jaký byl hlavní cíl reformy popsané v textu?",
-  "answers": ["Zlepšit správu provincie","Snížit obchod","Zavést nové daně"],
-  "correctIndex": 0
-}
-
-2)
-{
-  "question": "Kdo inicioval změnu zmíněnou v textu?",
+  "question": "Kdo byl hlavním iniciátorem popsané změny?",
   "answers": ["Marcus Livius","Varro Atticus","Publius Marus"],
   "correctIndex": 0
 }
 
-BAD PŘÍKLAD (nepoužívat):
-"Co článek uvádí o X?"
+BAD PŘÍKLAD:
+"Co článek říká o X?"
 
 PRAVIDLA:
-- Nepoužívej reference na článek („v textu“, „článek říká“).
-- Používej pouze fakta z textu.
+- Použij pouze fakta v textu.
+- Vyhni se přímým odkazům na článek (ne “v textu”, “článek říká”).
+- Preferuj otázky typu role, příčina, následek.
 - Správná odpověď nesmí být stejná jako název článku: "${title}".
-- Preferuj: příčiny, role, důsledky.
 - Jazyk: ${lang}
 - Pouze JSON.
 `.trim();
@@ -120,17 +112,16 @@ PRAVIDLA:
 ------------------------------------------------------------- */
 function pickSlice(text) {
   if (text.length < 3500) return text;
-
   if (Math.random() < 0.5) return text;
 
-  const sliceLen = 3000 + Math.floor(Math.random() * 600);
+  const sliceLen = 3000 + Math.floor(Math.random() * 500);
   const maxStart = Math.max(0, text.length - sliceLen);
   const start = Math.floor(Math.random() * maxStart);
   return text.slice(start, start + sliceLen);
 }
 
 /* -------------------------------------------------------------
-   Extract clean JSON
+   JSON cleanup
 ------------------------------------------------------------- */
 function extractJSON(text) {
   let cleaned = text
@@ -150,10 +141,11 @@ export default async function handler(req, res) {
 
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST")
-    return res.status(200).json({ ok: true, info: "Use POST" });
+    return res.status(200).json({ ok: true, info: "POST only" });
 
   const apiKey = process.env.GOOGLE_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: "Missing GOOGLE_API_KEY" });
+  if (!apiKey)
+    return res.status(500).json({ error: "Missing GOOGLE_API_KEY" });
 
   let body = req.body;
   if (typeof body === "string") try { body = JSON.parse(body); } catch {}
@@ -190,8 +182,9 @@ export default async function handler(req, res) {
   const jsonString = extractJSON(txt);
 
   let obj;
-  try { obj = JSON.parse(jsonString); }
-  catch {
+  try {
+    obj = JSON.parse(jsonString);
+  } catch {
     return res.status(500).json({ error: "Invalid JSON", rawText: jsonString });
   }
 
