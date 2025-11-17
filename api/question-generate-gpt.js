@@ -1,6 +1,4 @@
-// /api/question-generate-gpt.js
-// GPT question generator with automatic slicing for WikiGame
-
+// api/question-generate-gpt.js
 import OpenAI from "openai";
 
 export const config = {
@@ -33,7 +31,7 @@ export default async function handler(req, res) {
   }
 
   /* -----------------------------------------------
-     OPENAI CLIENT (from env)
+     OPENAI CLIENT
   ----------------------------------------------- */
   const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
@@ -41,7 +39,7 @@ export default async function handler(req, res) {
 
   try {
     /* -----------------------------------------------
-       GPT REQUEST — NEW Responses API
+       GPT REQUEST — Responses API (FINAL FORMAT)
     ----------------------------------------------- */
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
@@ -68,12 +66,14 @@ ARTICLE TEXT: ${context.slice(0, 12000)}
 `,
 
       text: {
-        format: "json",        // 🔥 replaces old "response_format"
-      },
+        format: {
+          type: "json"   // ← correct structure
+        }
+      }
     });
 
-    let raw = response.output_text;
-    let data = null;
+    const raw = response.output_text || "";
+    let data;
 
     try {
       data = JSON.parse(raw);
@@ -83,15 +83,16 @@ ARTICLE TEXT: ${context.slice(0, 12000)}
         .json({ error: "Bad JSON from GPT", raw });
     }
 
-    // add model for later saving
     data.model = "gpt-4.1-mini";
 
     return res.status(200).json(data);
+
   } catch (err) {
     console.error("GPT ERROR:", err);
+
     return res.status(500).json({
       error: "SERVER_ERROR",
-      detail: String(err),
+      detail: err?.message || String(err),
     });
   }
 }
