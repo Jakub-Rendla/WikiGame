@@ -1,57 +1,64 @@
 // api/question-rate.js
-// Save user rating for a question (quality + difficulty + selected answer)
+// Saves user rating into wiki_questions_rating
 
 export const config = { runtime: "nodejs" };
 
-function setCors(res, origin = "*") {
-  res.setHeader("Access-Control-Allow-Origin", origin || "*");
-  res.setHeader("Vary", "Origin");
+import { createClient } from "@supabase/supabase-js";
+
+function cors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
 export default async function handler(req, res) {
-  setCors(res, req.headers.origin);
-
+  cors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Use POST" });
 
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const serviceKey  = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
-  if (!supabaseUrl || !serviceKey) {
+  const SUPA_URL = process.env.SUPABASE_URL;
+  const SUPA_KEY = process.env.SUPABASE_SERVICE_KEY;
+
+  if (!SUPA_URL || !SUPA_KEY) {
     return res.status(500).json({ error: "Missing Supabase keys" });
   }
 
-  const payload = req.body || {};
+  const supabase = createClient(SUPA_URL, SUPA_KEY);
 
-  if (!payload.question_hash) {
+  const {
+    question_hash,
+    quality_rating,
+    difficulty_rating,
+    selected_answer,
+    correct,
+    model,
+    topic_title
+  } = req.body || {};
+
+  if (!question_hash) {
     return res.status(400).json({ error: "Missing question_hash" });
   }
 
-  try {
-    const r = await fetch(`${supabaseUrl}/rest/v1/wiki_question_ratings`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: serviceKey,
-        Authorization: `Bearer ${serviceKey}`
-      },
-      body: JSON.stringify(payload)
-    });
+  const { data, error } = await supabase
+    .from("wiki_questions_rating")
+    .insert({
+      question_hash,
+      quality_rating,
+      difficulty_rating,
+      selected_answer,
+      correct,
+      model,
+      topic_title
+    })
+    .select("*");
 
-    const text = await r.text();
-
-    if (!r.ok) {
-      return res.status(500).json({
-        error: "Supabase insert failed",
-        status: r.status,
-        body: text
-      });
-    }
-
-    return res.status(200).json({ ok: true, saved: payload });
-  } catch (e) {
-    return res.status(500).json({ error: "Server error", detail: String(e) });
+  if (error) {
+    console.error("RATE ERROR:", error);
+    return res.status(500).json({ error: error.message });
   }
+
+  return res.status(200).json({ stored: true });
 }
