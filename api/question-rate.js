@@ -1,105 +1,57 @@
 // api/question-rate.js
-// Stores individual user rating into wiki_question_ratings table
+// Save user rating for a question (quality + difficulty + selected answer)
 
 export const config = { runtime: "nodejs" };
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+function setCors(res, origin = "*") {
+  res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 export default async function handler(req, res) {
-  setCors(res);
+  setCors(res, req.headers.origin);
 
-  // Preflight
-  if (req.method === "OPTIONS") {
-    setCors(res);
-    return res.status(200).end();
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Use POST" });
+
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceKey  = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl || !serviceKey) {
+    return res.status(500).json({ error: "Missing Supabase keys" });
   }
 
-  if (req.method !== "POST") {
-    setCors(res);
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  const payload = req.body || {};
 
-  let body;
-  try {
-    body = req.body;
-  } catch (err) {
-    setCors(res);
-    return res.status(400).json({ error: "Invalid JSON body" });
-  }
-
-  const {
-    question_hash,
-    quality_rating,
-    difficulty_rating,
-    selected_answer,
-    correct,
-    model,
-    topic_title
-  } = body || {};
-
-  // Validate required fields
-  if (!question_hash) {
-    setCors(res);
-    return res.status(400).json({
-      error: "Missing question_hash",
-      body
-    });
-  }
-
-  if (quality_rating == null && difficulty_rating == null) {
-    setCors(res);
-    return res.status(400).json({
-      error: "No rating provided",
-      body
-    });
+  if (!payload.question_hash) {
+    return res.status(400).json({ error: "Missing question_hash" });
   }
 
   try {
-    const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/wiki_question_ratings`, {
+    const r = await fetch(`${supabaseUrl}/rest/v1/wiki_question_ratings`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        apikey: process.env.SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`
       },
-      body: JSON.stringify({
-        question_hash,
-        quality_rating,
-        difficulty_rating,
-        selected_answer,
-        correct,
-        model,
-        topic_title
-      })
+      body: JSON.stringify(payload)
     });
 
     const text = await r.text();
 
     if (!r.ok) {
-      setCors(res);
-      return res.status(r.status).json({
+      return res.status(500).json({
         error: "Supabase insert failed",
         status: r.status,
         body: text
       });
     }
 
-    setCors(res);
-    return res.status(200).json({
-      success: true,
-      inserted: true
-    });
-
-  } catch (err) {
-    console.error("RATE QUESTION ERROR:", err);
-    setCors(res);
-    return res.status(500).json({
-      error: "Internal server error",
-      detail: err.message
-    });
+    return res.status(200).json({ ok: true, saved: payload });
+  } catch (e) {
+    return res.status(500).json({ error: "Server error", detail: String(e) });
   }
 }
