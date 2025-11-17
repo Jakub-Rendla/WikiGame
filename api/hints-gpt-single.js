@@ -1,3 +1,12 @@
+// api/hints-gpt-single.js
+// GPT-4o-mini single question generator
+// - title-aware
+// - numeric filter
+// - answer-in-question filter
+// - random slice
+// - strict JSON
+// - robust validation
+
 export const config = { runtime: "nodejs" };
 
 /* -------------------------------------------------------------
@@ -29,7 +38,6 @@ async function sha256(str) {
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
-
   if (req.method !== "POST")
     return res.status(405).json({ error: "Method not allowed" });
 
@@ -60,9 +68,6 @@ RULES:
 - Keep answers short and distinct.
 - NEVER repeat the question across calls.
 
-OUTPUT EXAMPLE:
-{"question":"Q","answers":["A1","A2","A3"],"correctIndex":1}
-
 ARTICLE TITLE:
 "${title}"
 
@@ -73,9 +78,10 @@ ${context}
   console.log("[GPT] Calling model gpt-4o-mini…");
 
   /* -----------------------------------------------------------
-     CALL GPT
+     CALL GPT using JSON_MODE
   ----------------------------------------------------------- */
-  let raw = "";
+  let parsed = null;
+
   try {
     const gptRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -85,48 +91,44 @@ ${context}
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
+        response_format: { type: "json_object" },
         messages: [{ role: "user", content: prompt }],
-        temperature: 0.7
+        temperature: 0.6
       })
     });
 
-    raw = await gptRes.text();
-    console.log("[GPT RAW]:", raw);
-  } catch (err) {
-    console.log("[GPT ERROR]:", err);
-    return res.status(500).json({ error: "GPT fetch failed" });
-  }
+    const data = await gptRes.json();
+    console.log("[GPT RAW]", data);
 
-  /* -----------------------------------------------------------
-     PARSE JSON ROBUSTLY
-  ----------------------------------------------------------- */
-  let json = null;
-  try {
-    const match = raw.match(/\{[\s\S]*\}/);
-    json = match ? JSON.parse(match[0]) : null;
+    parsed = data.choices?.[0]?.message?.content
+      ? JSON.parse(data.choices[0].message.content)
+      : null;
+
   } catch (err) {
-    console.log("[JSON PARSE ERROR]:", err);
-    return res.status(500).json({ error: "Invalid JSON returned" });
+    console.error("[GPT ERROR]", err);
+    return res.status(500).json({ error: "GPT fetch/JSON parse failed" });
   }
 
   if (
-    !json ||
-    !json.question ||
-    !Array.isArray(json.answers) ||
-    typeof json.correctIndex !== "number"
+    !parsed ||
+    !parsed.question ||
+    !Array.isArray(parsed.answers) ||
+    typeof parsed.correctIndex !== "number"
   ) {
     return res.status(500).json({ error: "Invalid question structure" });
   }
 
   /* -----------------------------------------------------------
-     GENERATE question_hash
+     ADD MODEL + question_hash
   ----------------------------------------------------------- */
-  json.model = "gpt-4o-mini";
-  json.question_hash = await sha256(
-    json.question + "|" + json.answers.join("|") + "|" + json.correctIndex
+  parsed.model = "gpt-4o-mini";
+  parsed.question_hash = await sha256(
+    parsed.question + "|" +
+    parsed.answers.join("|") + "|" +
+    parsed.correctIndex
   );
 
-  console.log("[GPT] OK → Hash:", json.question_hash);
+  console.log("[GPT OK] →", parsed.question_hash);
 
-  return res.status(200).json(json);
+  return res.status(200).json(parsed);
 }
