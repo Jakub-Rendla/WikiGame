@@ -1,63 +1,83 @@
-// api/hints-gpt-single.js
-// GPT-4o-mini single question generator
-// - title-aware
-// - numeric filter
-// - answer-in-question filter
-// - random slice
-// - strict JSON
-
 export const config = { runtime: "nodejs" };
 
+/* -------------------------------------------------------------
+   CORS
+------------------------------------------------------------- */
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
 }
 
+/* -------------------------------------------------------------
+   HASH
+------------------------------------------------------------- */
+async function sha256(str) {
+  const buf = new TextEncoder().encode(str);
+  const hash = await crypto.subtle.digest("SHA-256", buf);
+  return [...new Uint8Array(hash)]
+    .map(x => x.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/* -------------------------------------------------------------
+   HANDLER
+------------------------------------------------------------- */
 export default async function handler(req, res) {
   setCors(res);
+  if (req.method === "OPTIONS") return res.status(200).end();
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    setCors(res);
+  if (req.method !== "POST")
     return res.status(405).json({ error: "Method not allowed" });
-  }
 
-  let body = req.body;
-  if (!body || !body.context) {
-    setCors(res);
+  const body = req.body || {};
+  const lang = body.lang || "cs";
+  const context = body.context || "";
+  const title = body.title || "";
+
+  if (!context.trim())
     return res.status(400).json({ error: "Missing context" });
-  }
 
-  const { lang, context, title } = body;
+  if (!title.trim())
+    return res.status(400).json({ error: "Missing title" });
 
-  // Strict prompt
+  /* -----------------------------------------------------------
+     BUILD PROMPT
+  ----------------------------------------------------------- */
   const prompt = `
-Generate EXACTLY 1 factual multiple-choice quiz question in STRICT JSON.
+Generate ONE quiz question in STRICT JSON ONLY.
+
 LANGUAGE: ${lang}
 
 RULES:
-- Base ONLY on the given text.
-- DO NOT include numeric traps.
-- Avoid repeating numbers or facts not found in text.
-- Provide 3 answers (one correct).
-- Return STRICT JSON:
-{
-  "question": "",
-  "answers": ["",""],
-  "correctIndex": 1,
-  "model": "gpt-4o-mini"
-}
+- Use ONLY information from the provided article.
+- The question must be factual and unambiguous.
+- Provide exactly 3 answer options.
+- EXACTLY ONE answer must be correct.
+- Keep answers short and distinct.
+- NEVER repeat the question across calls.
 
-TEXT:
-${context.slice(0, 9000)}
-`;
+OUTPUT EXAMPLE:
+{"question":"Q","answers":["A1","A2","A3"],"correctIndex":1}
 
+ARTICLE TITLE:
+"${title}"
+
+ARTICLE:
+${context}
+  `;
+
+  console.log("[GPT] Calling model gpt-4o-mini…");
+
+  /* -----------------------------------------------------------
+     CALL GPT
+  ----------------------------------------------------------- */
+  let raw = "";
   try {
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    const gptRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -65,64 +85,48 @@ ${context.slice(0, 9000)}
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: "You are a strict JSON generator."},
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.3,
-        max_tokens: 300
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.7
       })
     });
 
-    const raw = await r.text();
-
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch (err) {
-      setCors(res);
-      return res.status(500).json({
-        error: "OpenAI returned non-JSON",
-        raw
-      });
-    }
-
-    const content = data?.choices?.[0]?.message?.content;
-    if (!content) {
-      setCors(res);
-      return res.status(500).json({ error: "No content from model" });
-    }
-
-    let parsed;
-    try {
-      parsed = JSON.parse(content);
-    } catch (err) {
-      setCors(res);
-      return res.status(500).json({
-        error: "Model JSON parse error",
-        raw: content
-      });
-    }
-
-    if (!parsed.question || !Array.isArray(parsed.answers)) {
-      setCors(res);
-      return res.status(500).json({
-        error: "Invalid JSON format",
-        parsed
-      });
-    }
-
-    parsed.model = "gpt-4o-mini";
-
-    setCors(res);
-    return res.status(200).json(parsed);
-
+    raw = await gptRes.text();
+    console.log("[GPT RAW]:", raw);
   } catch (err) {
-    console.error("GPT ERROR:", err);
-    setCors(res);
-    return res.status(500).json({
-      error: "Internal error",
-      detail: err.message
-    });
+    console.log("[GPT ERROR]:", err);
+    return res.status(500).json({ error: "GPT fetch failed" });
   }
+
+  /* -----------------------------------------------------------
+     PARSE JSON ROBUSTLY
+  ----------------------------------------------------------- */
+  let json = null;
+  try {
+    const match = raw.match(/\{[\s\S]*\}/);
+    json = match ? JSON.parse(match[0]) : null;
+  } catch (err) {
+    console.log("[JSON PARSE ERROR]:", err);
+    return res.status(500).json({ error: "Invalid JSON returned" });
+  }
+
+  if (
+    !json ||
+    !json.question ||
+    !Array.isArray(json.answers) ||
+    typeof json.correctIndex !== "number"
+  ) {
+    return res.status(500).json({ error: "Invalid question structure" });
+  }
+
+  /* -----------------------------------------------------------
+     GENERATE question_hash
+  ----------------------------------------------------------- */
+  json.model = "gpt-4o-mini";
+  json.question_hash = await sha256(
+    json.question + "|" + json.answers.join("|") + "|" + json.correctIndex
+  );
+
+  console.log("[GPT] OK → Hash:", json.question_hash);
+
+  return res.status(200).json(json);
 }
