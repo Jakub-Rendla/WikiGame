@@ -20,7 +20,7 @@ export default async function handler(req, res) {
   }
 
   const SUPA_URL = process.env.SUPABASE_URL;
-  const SUPA_KEY = process.env.SUPABASE_SERVICE_KEY;
+  const SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!SUPA_URL || !SUPA_KEY) {
     return res.status(500).json({ error: "Missing Supabase keys" });
