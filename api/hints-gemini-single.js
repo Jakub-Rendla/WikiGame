@@ -1,6 +1,5 @@
 // api/hints-gemini-single.js
-// Gemini Flash-Lite — EDGE RUNTIME VERSION
-// strict JSON, 3 GOOD + 3 BAD few-shot, anti-meta, full validation
+// Gemini Flash-Lite — EDGE RUNTIME + RETRY
 
 export const config = { runtime: "edge" };
 
@@ -62,7 +61,7 @@ function validateAnswers(obj, title) {
 }
 
 /* -------------------------------------------------------------
-   Prompt (3 GOOD + 3 BAD)
+   Prompt (few-shot)
 ------------------------------------------------------------- */
 function buildGeminiPrompt(lang, title) {
   return `
@@ -75,7 +74,7 @@ Vygeneruj přesně 1 otázku jako STRICT JSON:
 }
 
 ====================
-GOOD PŘÍKLADY
+GOOD
 ====================
 
 GOOD 1:
@@ -100,40 +99,22 @@ GOOD 3:
 }
 
 ====================
-BAD PŘÍKLADY
+BAD
 ====================
 
-BAD 1:
-"Co podle tohoto článku text říká?"   // meta — zakázáno
-
-BAD 2:
-{
-  "question": "Kolik měřil rok 1875?",
-  "answers": ["1875","1876","1874"],
-  "correctIndex": 1
-}   // odpovědi příliš podobné
-
-BAD 3:
-{
-  "question": "Jaké tři věci článek uvádí?",
-  "answers": ["...","...","..."],
-  "correctIndex": 1
-}   // extrakce — zakázáno
-
+BAD 1: "Co podle tohoto článku text říká?"
+BAD 2: {"question":"Kolik měřil rok 1875?","answers":["1875","1876","1874"],"correctIndex":1}
+BAD 3: {"question":"Jaké tři věci článek uvádí?","answers":["...","...","..."],"correctIndex":1}
 
 ====================
 PRAVIDLA
 ====================
 
-- Použij POUZE fakta obsažená v textu.
-- Nikdy neodkazuj na článek samotný („v tomto článku“, „text uvádí“…).
-- Správná odpověď nesmí být totožná ani podobná názvu článku "${title}".
+- Nepoužívej meta reference („text uvádí“, „článek říká“).
+- Odpověď nesmí být totožná ani podobná názvu článku "${title}".
 - Žádné vymyšlené údaje.
-- Neuváděj příliš obecné otázky.
-- Preferuj: příčiny, důsledky, role, funkce, vztahy.
-- Odpovědi musí být stejného typu.
-- Otázka nesmí obsahovat správnou odpověď.
-- Pouze čistý JSON.
+- Preferuj příčiny, následky, role, funkce.
+- Odpovědi stejného typu.
 - Jazyk: ${lang}
 `.trim();
 }
@@ -160,7 +141,41 @@ function extractJSON(text) {
 }
 
 /* -------------------------------------------------------------
-   Handler (EDGE)
+   Core Gemini request (single attempt)
+------------------------------------------------------------- */
+async function tryGenerateGemini(system, user, apiKey) {
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [
+        { role: "user", parts: [{ text: system }] },
+        { role: "user", parts: [{ text: user }] }
+      ],
+      generationConfig: {
+        temperature: 0.65,
+        maxOutputTokens: 200
+      }
+    })
+  });
+
+  const data = await r.json();
+  const txt =
+    data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
+
+  const jsonString = extractJSON(txt);
+  try {
+    return JSON.parse(jsonString);
+  } catch {
+    return null;
+  }
+}
+
+/* -------------------------------------------------------------
+   Handler (EDGE) with retry
 ------------------------------------------------------------- */
 export default async function handler(request) {
   try {
@@ -178,52 +193,29 @@ export default async function handler(request) {
         status: 500
       });
 
-    const chosen = pickSlice(context);
-    const system = buildGeminiPrompt(lang, title);
-    const user = `Zde je text článku:\n"""${chosen}"""\nVrať striktně JSON.`;
+    let finalObj = null;
 
-    const url =
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const chosen = pickSlice(context);
+      const system = buildGeminiPrompt(lang, title);
+      const user = `Zde je text článku:\n"""${chosen}"""\nVrať striktně JSON.`;
 
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          { role: "user", parts: [{ text: system }] },
-          { role: "user", parts: [{ text: user }] }
-        ],
-        generationConfig: {
-          temperature: 0.65,
-          maxOutputTokens: 200
-        }
-      })
-    });
+      const obj = await tryGenerateGemini(system, user, apiKey);
 
-    const data = await r.json();
-    let txt =
-      data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
+      if (obj && validateAnswers(obj, title)) {
+        finalObj = obj;
+        break;
+      }
+    }
 
-    const jsonString = extractJSON(txt);
-
-    let obj;
-    try {
-      obj = JSON.parse(jsonString);
-    } catch {
+    if (!finalObj) {
       return new Response(
-        JSON.stringify({ error: "Invalid JSON", rawText: jsonString }),
+        JSON.stringify({ error: "Answer validation failed (retry)" }),
         { status: 500 }
       );
     }
 
-    if (!validateAnswers(obj, title)) {
-      return new Response(
-        JSON.stringify({ error: "Answer validation failed", obj }),
-        { status: 500 }
-      );
-    }
-
-    return new Response(JSON.stringify(obj), {
+    return new Response(JSON.stringify(finalObj), {
       status: 200,
       headers: { "Content-Type": "application/json" }
     });
