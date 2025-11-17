@@ -1,120 +1,109 @@
-// /api/questions-gpt-gfl-debug.js
-// FULL RAW DEBUG — prints GPT + Gemini raw responses + errors
+// /api/debug.js
+// REAL RAW DEBUG ENDPOINT — returns GPT + Gemini raw output
 
 export const config = { runtime: "nodejs" };
 
-function setCors(res, origin = "*") {
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+function setCorsHeaders(headers) {
+  return {
+    ...headers,
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type"
+  };
 }
 
-/* -------------------------------------------------------------
-   PROMPT GPT
-------------------------------------------------------------- */
-function promptGPT(lang, context) {
-  return `
-Generate EXACTLY 5 question sets in STRICT JSON.
-LANGUAGE: ${lang}
-ARTICLE:
-${context}
-`;
-}
-
-/* -------------------------------------------------------------
-   PROMPT GEMINI
-------------------------------------------------------------- */
-function promptGemini(lang, context) {
-  return `
-Generate EXACTLY 3 question sets in STRICT JSON.
-LANGUAGE: ${lang}
-ARTICLE:
-${context}
-`;
-}
-
-/* -------------------------------------------------------------
-   RAW CALLS (NO FILTERING)
-------------------------------------------------------------- */
 async function askGPT(prompt) {
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [{ role: "user", content: prompt }],
-        temperature: 0,
-      }),
+        temperature: 0
+      })
     });
-    const j = await res.json();
-    return { raw: j, openaiStatus: res.status };
+
+    return {
+      httpStatus: response.status,
+      raw: await response.json()
+    };
   } catch (err) {
     return { error: String(err) };
   }
 }
 
 async function askGemini(prompt) {
-
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
   try {
-    const res = await fetch(url, {
+    const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0 },
-      }),
+        generationConfig: { temperature: 0 }
+      })
     });
 
-    const j = await res.json();
-    return { raw: j, geminiStatus: res.status, endpoint: url };
+    return {
+      endpoint: url,
+      httpStatus: response.status,
+      raw: await response.json()
+    };
   } catch (err) {
-    return { error: String(err), endpoint: url };
+    return { endpoint: url, error: String(err) };
   }
 }
 
-/* -------------------------------------------------------------
-   MAIN DEBUG HANDLER
-------------------------------------------------------------- */
-export default async function handler(req, res) {
-  setCors(res);
-
-  if (req.method === "OPTIONS") return res.status(200).end();
-
-  if (req.method !== "POST")
-    return res.status(405).json({ error: "ONLY_POST_ALLOWED" });
-
-  const { lang = "cs", context } = req.body || {};
-
-  if (!context)
-    return res.status(400).json({
-      error: "NO_CONTEXT",
-      body: req.body,
+export default async function handler(req) {
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 200,
+      headers: setCorsHeaders({})
     });
+  }
 
-  // build both prompts
-  const gptPrompt = promptGPT(lang, context);
-  const gemPrompt = promptGemini(lang, context);
+  if (req.method !== "POST") {
+    return new Response(JSON.stringify({ error: "USE_POST" }), {
+      status: 405,
+      headers: setCorsHeaders({ "Content-Type": "application/json" })
+    });
+  }
 
-  // run both in parallel
+  const { lang = "cs", context } = await req.json();
+
+  if (!context) {
+    return new Response(JSON.stringify({ error: "NO_CONTEXT" }), {
+      status: 400,
+      headers: setCorsHeaders({ "Content-Type": "application/json" })
+    });
+  }
+
+  const gptPrompt = `DEBUG GPT TEST. LANGUAGE=${lang}\nARTICLE:\n${context}`;
+  const gemPrompt = `DEBUG GEMINI TEST. LANGUAGE=${lang}\nARTICLE:\n${context}`;
+
   const [gpt, gem] = await Promise.all([
     askGPT(gptPrompt),
-    askGemini(gemPrompt),
+    askGemini(gemPrompt)
   ]);
 
-  return res.status(200).json({
-    debug: true,
-    receivedContext: context?.slice(0, 200) + "...",
-    OPENAI_KEY_EXISTS: !!process.env.OPENAI_API_KEY,
-    GEMINI_KEY_EXISTS: !!process.env.GEMINI_API_KEY,
-    gptPrompt,
-    gemPrompt,
-    gpt,
-    gem,
-  });
+  return new Response(
+    JSON.stringify({
+      debug: true,
+      OPENAI_KEY_EXISTS: !!process.env.OPENAI_API_KEY,
+      GEMINI_KEY_EXISTS: !!process.env.GEMINI_API_KEY,
+      gptPrompt,
+      gemPrompt,
+      gpt,
+      gem
+    }),
+    {
+      status: 200,
+      headers: setCorsHeaders({ "Content-Type": "application/json" })
+    }
+  );
 }
