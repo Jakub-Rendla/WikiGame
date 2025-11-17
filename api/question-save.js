@@ -72,8 +72,3 @@ export default async function handler(req, res) {
 
   return res.status(200).json({ success: true, data });
 }
-console.log("ENV CHECK", {
-  url: process.env.SUPABASE_URL,
-  anon: process.env.SUPABASE_ANON_KEY ? "OK" : "MISSING",
-  service: process.env.SUPABASE_SERVICE_ROLE_KEY ? "OK" : "MISSING"
-});
