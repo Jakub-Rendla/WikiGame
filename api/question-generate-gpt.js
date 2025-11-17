@@ -3,123 +3,86 @@
 
 export const config = { runtime: "nodejs" };
 
-/* ---------------------------------------------------------------------
-   CORS
-------------------------------------------------------------------------*/
-function setCors(res, origin = "*") {
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+/* ----------------------------------------------------------
+   CORS (musí být *naprosto* na začátku handleru)
+----------------------------------------------------------- */
+function applyCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-/* ---------------------------------------------------------------------
-   CLEAN HTML
-------------------------------------------------------------------------*/
-function cleanHTML(html) {
-  return html
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<\/?[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
+/* ----------------------------------------------------------
+   CLEAN
+----------------------------------------------------------- */
+function cleanHTML(str) {
+  return str
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-/* ---------------------------------------------------------------------
-   SLICER
-------------------------------------------------------------------------*/
-function sliceArticle(text) {
-  let raw = text.split(/(?=^#|\n#|\n==|\n===)/gm);
-
-  if (raw.length <= 1) {
-    const parts = [];
-    for (let i = 0; i < text.length; i += 1500) {
-      parts.push(text.slice(i, i + 1500));
-    }
-    return parts;
+function sliceText(t) {
+  if (t.length <= 1500) return [t];
+  const out = [];
+  for (let i = 0; i < Math.min(t.length, 8000); i += 1500) {
+    out.push(t.slice(i, i + 1500));
   }
-
-  return raw.map(s => s.trim()).filter(s => s.length > 200);
+  return out;
 }
 
-/* ---------------------------------------------------------------------
-   SHA256
-------------------------------------------------------------------------*/
-async function sha256(str) {
-  const crypto = await import("crypto");
-  return crypto.createHash("sha256").update(str).digest("hex");
-}
-
-/* ---------------------------------------------------------------------
-   GPT CLIENT
-------------------------------------------------------------------------*/
 import OpenAI from "openai";
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ---------------------------------------------------------------------
-   MAIN HANDLER
-------------------------------------------------------------------------*/
+import crypto from "crypto";
+const sha256 = str => crypto.createHash("sha256").update(str).digest("hex");
+
+/* ----------------------------------------------------------
+   MAIN
+----------------------------------------------------------- */
 export default async function handler(req, res) {
-  setCors(res, "*");
+  applyCors(res);
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
   if (req.method !== "POST") {
-    setCors(res, "*");
+    applyCors(res);
     return res.status(405).json({ error: "POST only" });
   }
 
   try {
     const { lang = "cs", context = "", title = "" } = req.body;
-
-    if (!context || context.length < 50) {
-      setCors(res, "*");
-      return res.status(400).json({ error: "Context too short" });
+    if (!context) {
+      applyCors(res);
+      return res.status(400).json({ error: "Missing context" });
     }
 
-    /* -----------------------------------------------------------
-       CLEAN + SLICE
-    ------------------------------------------------------------*/
     const clean = cleanHTML(context);
-    const slices = sliceArticle(clean);
+    const slices = sliceText(clean);
+    const slice = slices[Math.floor(Math.random() * slices.length)];
 
-    if (!slices.length) {
-      setCors(res, "*");
-      return res.status(400).json({ error: "No slices found" });
-    }
-
-    const maxSlices =
-      clean.length < 5000 ? 2 :
-      clean.length < 15000 ? 5 : 10;
-
-    const chosenSlices = slices.slice(0, maxSlices);
-    const slice = chosenSlices[Math.floor(Math.random() * chosenSlices.length)];
-
-    /* -----------------------------------------------------------
-       GPT GENERATION
-    ------------------------------------------------------------*/
     const prompt = `
-LANGUAGE: ${lang}
-
-You generate a single multiple-choice question based ONLY on the provided text slice.
-Rules:
-- Use only facts in the text.
-- 1 question
-- 3 answers
-- 1 correct answer
-- Strict JSON
+LANG: ${lang}
+One multiple-choice question (3 answers, 1 correct) based *only* on this text:
 
 TEXT:
 ${slice}
+
+Strict JSON:
+{
+  "question": "...",
+  "answers": ["a","b","c"],
+  "correctIndex": 0
+}
 `;
 
     const completion = await client.responses.create({
       model: "gpt-4.1-mini",
       input: prompt,
-      max_output_tokens: 200,
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -140,31 +103,24 @@ ${slice}
             additionalProperties: false
           }
         }
-      }
+      },
+      max_output_tokens: 150
     });
 
-    const data = completion.output[0].parsed;
+    const out = completion.output[0].parsed;
 
-    const question_hash = await sha256(
-      data.question + "|" +
-      data.answers.join("|") + "|" +
-      data.correctIndex
+    out.model = "gpt-4.1-mini";
+    out.question_hash = sha256(
+      out.question + "|" + out.answers.join("|") + "|" + out.correctIndex
     );
 
-    const enriched = {
-      ...data,
-      model: "gpt-4.1-mini",
-      question_hash
-    };
-
-    setCors(res, "*");
-    return res.status(200).json(enriched);
+    applyCors(res);
+    return res.status(200).json(out);
 
   } catch (err) {
-    console.error("GPT ERROR:", err);
-    setCors(res, "*");
-    return res
-      .status(500)
-      .json({ error: "Generator failed", detail: err.message });
+    console.error("ERR:", err);
+    applyCors(res);
+    return res.status(500).json({ error: "Server error", detail: String(err) });
   }
 }
+
