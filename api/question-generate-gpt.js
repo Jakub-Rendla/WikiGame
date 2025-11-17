@@ -1,6 +1,5 @@
 // /api/question-generate-gpt.js
-// GPT question generator with automatic slicing
-// for WikiGame (Jakub Rendla)
+// GPT question generator with automatic slicing for WikiGame
 
 export const config = { runtime: "nodejs" };
 
@@ -8,14 +7,14 @@ export const config = { runtime: "nodejs" };
    CORS
 ------------------------------------------------------------------------*/
 function setCors(res, origin = "*") {
-  res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 /* ---------------------------------------------------------------------
-   HELPER — Clean HTML → plain text
+   CLEAN HTML
 ------------------------------------------------------------------------*/
 function cleanHTML(html) {
   return html
@@ -28,14 +27,12 @@ function cleanHTML(html) {
 }
 
 /* ---------------------------------------------------------------------
-   HELPER — Split article into slices (sections)
+   SLICER
 ------------------------------------------------------------------------*/
 function sliceArticle(text) {
-  // split by common wiki-like headers
-  let rawSections = text.split(/(?=^#|\n#|\n==|\n===)/gm);
+  let raw = text.split(/(?=^#|\n#|\n==|\n===)/gm);
 
-  if (rawSections.length === 1) {
-    // fallback: split every 1500 chars
+  if (raw.length <= 1) {
     const parts = [];
     for (let i = 0; i < text.length; i += 1500) {
       parts.push(text.slice(i, i + 1500));
@@ -43,16 +40,11 @@ function sliceArticle(text) {
     return parts;
   }
 
-  // normalize and filter
-  const sections = rawSections
-    .map(s => s.trim())
-    .filter(s => s.length > 200); // must have some content
-
-  return sections;
+  return raw.map(s => s.trim()).filter(s => s.length > 200);
 }
 
 /* ---------------------------------------------------------------------
-   HASHING (sha-256)
+   SHA256
 ------------------------------------------------------------------------*/
 async function sha256(str) {
   const crypto = await import("crypto");
@@ -60,7 +52,7 @@ async function sha256(str) {
 }
 
 /* ---------------------------------------------------------------------
-   OPENAI CLIENT
+   GPT CLIENT
 ------------------------------------------------------------------------*/
 import OpenAI from "openai";
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -69,74 +61,69 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
    MAIN HANDLER
 ------------------------------------------------------------------------*/
 export default async function handler(req, res) {
-  setCors(res);
+  setCors(res, "*");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST")
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  if (req.method !== "POST") {
+    setCors(res, "*");
     return res.status(405).json({ error: "POST only" });
+  }
 
   try {
     const { lang = "cs", context = "", title = "" } = req.body;
 
     if (!context || context.length < 50) {
+      setCors(res, "*");
       return res.status(400).json({ error: "Context too short" });
     }
 
     /* -----------------------------------------------------------
-       1) Clean & slice the article
+       CLEAN + SLICE
     ------------------------------------------------------------*/
     const clean = cleanHTML(context);
     const slices = sliceArticle(clean);
 
     if (!slices.length) {
-      return res.status(400).json({ error: "No article slices" });
+      setCors(res, "*");
+      return res.status(400).json({ error: "No slices found" });
     }
 
-    // choose slice based on article length
     const maxSlices =
       clean.length < 5000 ? 2 :
-      clean.length < 15000 ? 5 :
-      10;
+      clean.length < 15000 ? 5 : 10;
 
     const chosenSlices = slices.slice(0, maxSlices);
-
-    // random pick (avoids repetition)
     const slice = chosenSlices[Math.floor(Math.random() * chosenSlices.length)];
 
     /* -----------------------------------------------------------
-       2) GPT generation (4.1-mini recommended)
+       GPT GENERATION
     ------------------------------------------------------------*/
     const prompt = `
 LANGUAGE: ${lang}
 
-You are generating a single multiple-choice question based ONLY on the provided text slice.
+You generate a single multiple-choice question based ONLY on the provided text slice.
 Rules:
-- Use ONLY facts from the text.
-- NO external facts.
-- EXACTLY 1 question.
-- EXACTLY 3 answers.
-- EXACTLY 1 correct answer.
-- Answers must be short and distinct.
+- Use only facts in the text.
+- 1 question
+- 3 answers
+- 1 correct answer
+- Strict JSON
 
-Return STRICT JSON:
-{
-  "question": "...",
-  "answers": ["A","B","C"],
-  "correctIndex": 0
-}
-
-TEXT SLICE:
+TEXT:
 ${slice}
 `;
 
     const completion = await client.responses.create({
-      model: "gpt-4.1-mini", // or "gpt-4o-mini-high"
+      model: "gpt-4.1-mini",
       input: prompt,
       max_output_tokens: 200,
       response_format: {
         type: "json_schema",
         json_schema: {
-          name: "wikigame_question",
+          name: "wikigame",
           schema: {
             type: "object",
             properties: {
@@ -158,11 +145,10 @@ ${slice}
 
     const data = completion.output[0].parsed;
 
-    /* -----------------------------------------------------------
-       3) Add metadata (model + hash)
-    ------------------------------------------------------------*/
     const question_hash = await sha256(
-      data.question + "|" + data.answers.join("|") + "|" + data.correctIndex
+      data.question + "|" +
+      data.answers.join("|") + "|" +
+      data.correctIndex
     );
 
     const enriched = {
@@ -171,11 +157,14 @@ ${slice}
       question_hash
     };
 
+    setCors(res, "*");
     return res.status(200).json(enriched);
 
   } catch (err) {
-    console.error("GPT GENERATE ERROR:", err);
-    return res.status(500).json({ error: "Generator failed", detail: err.message });
+    console.error("GPT ERROR:", err);
+    setCors(res, "*");
+    return res
+      .status(500)
+      .json({ error: "Generator failed", detail: err.message });
   }
 }
-
