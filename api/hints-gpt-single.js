@@ -1,34 +1,16 @@
 // api/hints-gpt-single.js
-// GPT-4o-mini single question generator (improved with 3 GOOD + 3 BAD few-shot)
-// - title-aware
-// - numeric filter
-// - answer-in-question filter
-// - random slice
-// - strict JSON
-// - strong prompt
-// - 3 GOOD + 3 BAD few-shot
-// - robust validation
+// GPT-4o-mini single question generator — EDGE RUNTIME VERSION
 
-export const config = { runtime: "nodejs" };
-
-function setCors(res, origin = "*") {
-  res.setHeader("Access-Control-Allow-Origin", origin || "*");
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-}
+export const config = { runtime: "edge" };
 
 /* -------------------------------------------------------------
    Helpers
 ------------------------------------------------------------- */
 function extractNumber(str) {
-  const m = str.match(/-?\d+(?:[\.,]\d+)?/);
+  const m = str.match(/-?\d+(?:[.,]\d+)?/);
   return m ? parseFloat(m[0].replace(",", ".")) : null;
 }
 
-/* -------------------------------------------------------------
-   Title-aware filter
-------------------------------------------------------------- */
 function validateTitleFilter(answer, title) {
   if (!title || title.trim().length < 3) return true;
 
@@ -42,28 +24,20 @@ function validateTitleFilter(answer, title) {
 
   let overlap = 0;
   for (const tw of titleWords) {
-    for (const aw of ansWords) {
-      if (aw === tw) overlap++;
-    }
+    if (ansWords.includes(tw)) overlap++;
   }
 
   return overlap < Math.ceil(titleWords.length * 0.5);
 }
 
-/* -------------------------------------------------------------
-   Global validation
-------------------------------------------------------------- */
 function validateAnswers(obj, title) {
   if (!obj || !Array.isArray(obj.answers)) return false;
 
-  const qLower = obj.question.toLowerCase();
+  const q = obj.question.toLowerCase();
 
   for (const ans of obj.answers) {
-    const a = ans.toLowerCase().trim();
-    if (a.length >= 3 && qLower.includes(a)) return false;
-  }
-
-  for (const ans of obj.answers) {
+    const a = ans.toLowerCase();
+    if (a.length >= 3 && q.includes(a)) return false;
     if (!validateTitleFilter(ans, title)) return false;
   }
 
@@ -78,15 +52,15 @@ function validateAnswers(obj, title) {
 
       const diff = Math.abs(fake - correct);
       const rel = diff / Math.max(1, Math.abs(correct));
-      if (diff < 10 || rel < 0.10) return false;
+
+      if (diff < 10 || rel < 0.1) return false;
     }
   }
-
   return true;
 }
 
 /* -------------------------------------------------------------
-   GPT PROMPT (with 3 GOOD + 3 BAD few-shot)
+   Prompt (with 3 GOOD + 3 BAD few-shot)
 ------------------------------------------------------------- */
 function buildPrompt(lang, title) {
   return `
@@ -128,7 +102,7 @@ BAD EXAMPLES
 ======================
 
 BAD 1:
-"Co podle tohoto článku autor tvrdí?"   // meta reference — forbidden
+"Co podle tohoto článku autor tvrdí?"   // meta reference
 
 BAD 2:
 {
@@ -139,7 +113,7 @@ BAD 2:
 
 BAD 3:
 {
-  "question": "Které tři stavby článek zmiňuje?",
+  "question": "Které tři věci článek zmiňuje?",
   "answers": ["...","...","..."],
   "correctIndex": 1
 }   // extraction question — forbidden
@@ -149,73 +123,58 @@ BAD 3:
 RULES
 ======================
 
-- Use ONLY explicit facts from the article text.
-- NEVER reference the article itself (forbidden: "v tomto článku", "text uvádí", "podle textu", etc.).
-- The question must be fully self-standing (no meta layer).
-- Do NOT repeat or restate the article title: "${title}".
-- The correct answer must NOT equal or be too similar to the article title.
-- All answers must be homogeneous type (all people / all cities / all dates / all objects).
-- No invented facts. No hallucinations.
-- No trivial universal facts unless explicitly present in the text.
-- Prefer deeper context: causes, roles, processes, functions, chronology.
-- The correct answer must not appear inside the question text.
-- Output STRICT JSON ONLY.
+- Use ONLY explicit facts from the provided article.
+- NEVER reference the article itself (forbidden: "v tomto článku", "text uvádí", etc.).
+- No meta commentary.
+- Do NOT repeat the article title: "${title}".
+- Correct answer must NOT be similar to title.
+- No invented facts.
+- No universal trivia unless explicitly present.
+- Prefer deeper context: causes, roles, processes, functions.
+- Answers must be homogeneous type.
 - Language: ${lang}
 `.trim();
 }
 
-/* -------------------------------------------------------------
-   Slice
-------------------------------------------------------------- */
-function pickSlice(full) {
-  const len = full.length;
-  if (len < 3500) return full;
+function pickSlice(txt) {
+  if (txt.length < 3500) return txt;
 
-  if (Math.random() < 0.5) return full;
+  if (Math.random() < 0.5) return txt;
 
   const sliceLen = 3000 + Math.floor(Math.random() * 600);
-  const maxStart = Math.max(0, len - sliceLen);
+  const maxStart = Math.max(0, txt.length - sliceLen);
   const start = Math.floor(Math.random() * maxStart);
-  return full.slice(start, start + sliceLen);
+  return txt.slice(start, start + sliceLen);
 }
 
 /* -------------------------------------------------------------
-   Handler
+   Handler (EDGE)
 ------------------------------------------------------------- */
-export default async function handler(req, res) {
+export default async function handler(request) {
   try {
-    const origin = req.headers?.origin || "*";
+    const { context = "", lang = "cs", title = "" } = await request.json();
 
-    if (req.method === "OPTIONS") {
-      setCors(res, origin);
-      return res.status(204).end();
+    if (!context) {
+      return new Response(JSON.stringify({ error: "Missing context" }), {
+        status: 400
+      });
     }
-
-    if (req.method !== "POST") {
-      setCors(res, origin);
-      return res.status(200).json({ ok: true, info: "Use POST" });
-    }
-
-    setCors(res, origin);
 
     const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
-
-    let body = req.body;
-    if (typeof body === "string") try { body = JSON.parse(body); } catch {}
-
-    const { context = "", lang = "cs", title = "" } = body;
-    if (!context) return res.status(400).json({ error: "Missing context" });
+    if (!apiKey)
+      return new Response(JSON.stringify({ error: "Missing OPENAI_API_KEY" }), {
+        status: 500
+      });
 
     const chosen = pickSlice(context);
     const systemPrompt = buildPrompt(lang, title);
-    const userPrompt = `ARTICLE TEXT:\n"""${chosen}"""`;
+    const userPrompt = `ARTICLE:\n"""${chosen}"""`;
 
     const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
@@ -224,27 +183,42 @@ export default async function handler(req, res) {
           { role: "user", content: userPrompt }
         ],
         temperature: 0.55,
-        max_output_tokens: 180
+        max_output_tokens: 200
       })
     });
 
     const raw = await r.json();
-    if (!raw || raw.error) return res.status(500).json({ error: "OpenAI error", raw });
 
-    const text = raw.output?.[0]?.content?.[0]?.text;
-    if (!text) return res.status(500).json({ error: "Empty text", raw });
+    const text = raw?.output?.[0]?.content?.[0]?.text;
+    if (!text)
+      return new Response(JSON.stringify({ error: "Empty text", raw }), {
+        status: 500
+      });
 
     let obj;
-    try { obj = JSON.parse(text); }
-    catch { return res.status(500).json({ error: "Invalid JSON", rawText: text }); }
-
-    if (!validateAnswers(obj, title)) {
-      return res.status(500).json({ error: "Answer validation failed", obj });
+    try {
+      obj = JSON.parse(text);
+    } catch {
+      return new Response(
+        JSON.stringify({ error: "Invalid JSON", rawText: text }),
+        { status: 500 }
+      );
     }
 
-    return res.status(200).json(obj);
+    if (!validateAnswers(obj, title)) {
+      return new Response(
+        JSON.stringify({ error: "Answer validation failed", obj }),
+        { status: 500 }
+      );
+    }
 
+    return new Response(JSON.stringify(obj), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
   } catch (e) {
-    return res.status(500).json({ error: "Fatal", details: e.toString() });
+    return new Response(JSON.stringify({ error: "Fatal", details: e.toString() }), {
+      status: 500
+    });
   }
 }
