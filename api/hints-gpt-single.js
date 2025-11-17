@@ -1,10 +1,12 @@
 // api/hints-gpt-single.js
-// GPT-4o-mini single question generator
+// GPT-4o-mini single question generator (improved with 3 GOOD + 3 BAD few-shot)
 // - title-aware
 // - numeric filter
 // - answer-in-question filter
 // - random slice
 // - strict JSON
+// - strong prompt
+// - 3 GOOD + 3 BAD few-shot
 // - robust validation
 
 export const config = { runtime: "nodejs" };
@@ -25,7 +27,7 @@ function extractNumber(str) {
 }
 
 /* -------------------------------------------------------------
-   Title-aware validation
+   Title-aware filter
 ------------------------------------------------------------- */
 function validateTitleFilter(answer, title) {
   if (!title || title.trim().length < 3) return true;
@@ -33,14 +35,10 @@ function validateTitleFilter(answer, title) {
   const a = answer.toLowerCase().trim();
   const t = title.toLowerCase().trim();
 
-  // exact match
   if (a === t) return false;
 
-  // split into words
   const titleWords = t.split(/\s+/).filter(w => w.length >= 3);
   const ansWords = a.split(/\s+/);
-
-  if (!titleWords.length) return true;
 
   let overlap = 0;
   for (const tw of titleWords) {
@@ -49,7 +47,6 @@ function validateTitleFilter(answer, title) {
     }
   }
 
-  // ≥50% overlap = too similar
   return overlap < Math.ceil(titleWords.length * 0.5);
 }
 
@@ -61,18 +58,15 @@ function validateAnswers(obj, title) {
 
   const qLower = obj.question.toLowerCase();
 
-  // Answer-in-question filter
   for (const ans of obj.answers) {
     const a = ans.toLowerCase().trim();
     if (a.length >= 3 && qLower.includes(a)) return false;
   }
 
-  // Title filter ONLY on answers
   for (const ans of obj.answers) {
     if (!validateTitleFilter(ans, title)) return false;
   }
 
-  // Numeric similarity
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
 
@@ -84,7 +78,6 @@ function validateAnswers(obj, title) {
 
       const diff = Math.abs(fake - correct);
       const rel = diff / Math.max(1, Math.abs(correct));
-
       if (diff < 10 || rel < 0.10) return false;
     }
   }
@@ -93,7 +86,7 @@ function validateAnswers(obj, title) {
 }
 
 /* -------------------------------------------------------------
-   Prompt
+   GPT PROMPT (with 3 GOOD + 3 BAD few-shot)
 ------------------------------------------------------------- */
 function buildPrompt(lang, title) {
   return `
@@ -105,19 +98,74 @@ Generate ONE quiz question in STRICT JSON:
   "correctIndex": 1
 }
 
-RULES:
-- Use ONLY article text.
-- Never reveal the correct answer inside the question.
-- The correct answer must NOT be exactly the article title: "${title}".
-- Answers must NOT contain the article title or be too similar to it.
-- If the answer is numeric, fake answers must differ strongly (±10 or ±10%).
+======================
+GOOD EXAMPLES
+======================
+
+GOOD 1:
+{
+  "question": "Které město sloužilo jako hlavní centrum obchodu?",
+  "answers": ["Siena","Arezzo","Perugia"],
+  "correctIndex": 0
+}
+
+GOOD 2:
+{
+  "question": "Kdo vedl expedici popsanou v textu?",
+  "answers": ["John Hunt","George Hall","Arthur Jamison"],
+  "correctIndex": 0
+}
+
+GOOD 3:
+{
+  "question": "Co způsobilo rozsáhlé poškození města?",
+  "answers": ["Záplavy po protržení hráze","Rozsáhlé požáry","Zemětřesení v sousední provincii"],
+  "correctIndex": 0
+}
+
+======================
+BAD EXAMPLES
+======================
+
+BAD 1:
+"Co podle tohoto článku autor tvrdí?"   // meta reference — forbidden
+
+BAD 2:
+{
+  "question": "Jaký byl rok 1875?",
+  "answers": ["1875","1876","1874"],
+  "correctIndex": 0
+}   // answers too similar
+
+BAD 3:
+{
+  "question": "Které tři stavby článek zmiňuje?",
+  "answers": ["...","...","..."],
+  "correctIndex": 1
+}   // extraction question — forbidden
+
+
+======================
+RULES
+======================
+
+- Use ONLY explicit facts from the article text.
+- NEVER reference the article itself (forbidden: "v tomto článku", "text uvádí", "podle textu", etc.).
+- The question must be fully self-standing (no meta layer).
+- Do NOT repeat or restate the article title: "${title}".
+- The correct answer must NOT equal or be too similar to the article title.
+- All answers must be homogeneous type (all people / all cities / all dates / all objects).
+- No invented facts. No hallucinations.
+- No trivial universal facts unless explicitly present in the text.
+- Prefer deeper context: causes, roles, processes, functions, chronology.
+- The correct answer must not appear inside the question text.
+- Output STRICT JSON ONLY.
 - Language: ${lang}
-- No markdown.
 `.trim();
 }
 
 /* -------------------------------------------------------------
-   Random slice
+   Slice
 ------------------------------------------------------------- */
 function pickSlice(full) {
   const len = full.length;
@@ -175,14 +223,13 @@ export default async function handler(req, res) {
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt }
         ],
-        temperature: 0.60,
+        temperature: 0.55,
         max_output_tokens: 180
       })
     });
 
-    const raw = await r.json().catch(() => null);
-    if (!raw) return res.status(500).json({ error: "Invalid OpenAI response" });
-    if (raw.error) return res.status(500).json({ error: raw.error });
+    const raw = await r.json();
+    if (!raw || raw.error) return res.status(500).json({ error: "OpenAI error", raw });
 
     const text = raw.output?.[0]?.content?.[0]?.text;
     if (!text) return res.status(500).json({ error: "Empty text", raw });
