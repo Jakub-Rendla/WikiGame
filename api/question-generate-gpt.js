@@ -1,46 +1,32 @@
 // api/question-generate-gpt.js
-
 import OpenAI from "openai";
 
-export const config = {
-  runtime: "nodejs",
-};
+export const config = { runtime: "nodejs" };
 
-function allowCors(res) {
+function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
 export default async function handler(req, res) {
-  allowCors(res);
+  cors(res);
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(400).json({ error: "POST only" });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(400).json({ error: "POST only" });
 
   const { lang = "cs", title = "", context = "" } = req.body || {};
 
   if (!context || !title) {
-    return res.status(400).json({
-      error: "Missing required fields: title, context",
-    });
+    return res.status(400).json({ error: "Missing title or context" });
   }
 
   const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
   });
 
-  try {
-    const response = await client.responses.create({
-      model: "gpt-4.1-mini",
-
-      input: `
-Generate ONE quiz question in STRICT JSON:
+  const prompt = `
+Generate EXACTLY this JSON:
 
 {
   "question": "...",
@@ -50,20 +36,23 @@ Generate ONE quiz question in STRICT JSON:
 
 RULES:
 - Language: ${lang}
-- Based ONLY on the provided article
-- Exactly 3 answers
-- Exactly 1 correct
-- Factual
-- No hallucinations
-- Keep it concise
+- Based ONLY on the article text
+- 1 question only
+- 3 answers only
+- 1 correct answer only
+- Keep it factual
+- NO extra text before or after JSON
 
 TITLE: ${title}
-TEXT: ${context.slice(0, 12000)}
-`,
+TEXT:
+${context.slice(0, 12000)}
+`;
 
-      text: {
-        format: "json_object"  // << ✔ VALID FORMAT
-      }
+  try {
+    // gpt-4.1-mini must use "input", WITHOUT text.format
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: prompt
     });
 
     const raw = response.output_text;
@@ -71,9 +60,9 @@ TEXT: ${context.slice(0, 12000)}
     let data;
     try {
       data = JSON.parse(raw);
-    } catch {
+    } catch (err) {
       return res.status(500).json({
-        error: "Bad JSON returned by model",
+        error: "Model did not return valid JSON",
         raw
       });
     }
@@ -84,10 +73,9 @@ TEXT: ${context.slice(0, 12000)}
 
   } catch (err) {
     console.error("GPT ERROR:", err);
-
     return res.status(500).json({
       error: "SERVER_ERROR",
-      detail: err?.message || String(err),
+      detail: err?.message || String(err)
     });
   }
 }
