@@ -1,106 +1,110 @@
-// /api/question-save.js
+// api/question-save.js
+// Saves generated question into wiki_questions table
+
 export const config = { runtime: "nodejs" };
 
-import { createClient } from "@supabase/supabase-js";
-
-/* -------------------------------------------------------------
-   CORS
--------------------------------------------------------------- */
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-/* -------------------------------------------------------------
-   MAIN HANDLER
--------------------------------------------------------------- */
 export default async function handler(req, res) {
   setCors(res);
 
+  // Preflight
   if (req.method === "OPTIONS") {
+    setCors(res);
     return res.status(200).end();
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method Not Allowed" });
+    setCors(res);
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
-  /* ---------------------------------------------------------
-       EXPECTED PAYLOAD
-       {
-         question_hash: string,
-         article_hash: string,
-         lang: "cs"|"en"|...,
-         topic_title: string,
-         context_slice: string,
-
-         question: string,
-         answers: ["A", "B", "C"],
-         correct_index: 0|1|2,
-
-         model: "gpt-4o-mini"|"gemini-2.0-flash-lite"
-       }
-  ---------------------------------------------------------- */
+  let body;
+  try {
+    body = req.body;
+  } catch (err) {
+    setCors(res);
+    return res.status(400).json({ error: "Invalid JSON body" });
+  }
 
   const {
     question_hash,
-    article_hash,
-    lang,
-    topic_title,
-    context_slice,
     question,
     answers,
     correct_index,
-    model
-  } = req.body || {};
+    model,
+    article_hash,
+    context_slice,
+    topic_title,
+    lang
+  } = body || {};
 
-  /* ---------------------------------------------------------
-       VALIDATION
-  ---------------------------------------------------------- */
-  if (!question_hash) return res.status(400).json({ error: "Missing question_hash" });
-  if (!question) return res.status(400).json({ error: "Missing question" });
-  if (!Array.isArray(answers) || answers.length !== 3)
-    return res.status(400).json({ error: "answers must be array of 3 items" });
-  if (correct_index === undefined)
-    return res.status(400).json({ error: "Missing correct_index" });
-  if (!model) return res.status(400).json({ error: "Missing model" });
-  if (!lang) return res.status(400).json({ error: "Missing lang" });
-
-  const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_KEY
-  );
-
-  /* ---------------------------------------------------------
-       INSERT — with ON CONFLICT DO NOTHING 
-       (unique by question_hash)
-  ---------------------------------------------------------- */
-  const { data, error } = await supabase
-    .from("wiki_questions")
-    .insert({
-      question_hash,
-      article_hash: article_hash || "",
-      lang,
-      topic_title: topic_title || "",
-      context_slice: context_slice || "",
-      question,
-      answers,
-      correct_index,
-      model
-    })
-    .select("*");
-
-  // If the row already exists, skip error (thanks to unique constraint)
-  if (error && error.code !== "23505") {
-    console.error("[SAVE QUESTION] Error:", error);
-    return res.status(500).json({ error: error.message });
+  // Validate
+  if (!question_hash ||
+      !question ||
+      !answers ||
+      typeof correct_index !== "number" ||
+      !model ||
+      !article_hash ||
+      !context_slice ||
+      !topic_title ||
+      !lang) 
+  {
+    setCors(res);
+    return res.status(400).json({
+      error: "Missing required fields",
+      body
+    });
   }
 
-  return res.json({
-    ok: true,
-    saved: error ? false : true,
-    reason: error ? "duplicate_question_hash" : "inserted",
-    data: data || null
-  });
+  try {
+    const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/wiki_questions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: process.env.SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`
+      },
+      body: JSON.stringify({
+        question_hash,
+        question,
+        answers,
+        correct_index,
+        model,
+        article_hash,
+        context_slice,
+        topic_title,
+        lang
+      })
+    });
+
+    const text = await r.text();
+
+    if (!r.ok) {
+      setCors(res);
+      return res.status(500).json({
+        error: "Supabase insert failed",
+        status: r.status,
+        body: text
+      });
+    }
+
+    setCors(res);
+    return res.status(200).json({
+      success: true,
+      inserted: true
+    });
+
+  } catch (err) {
+    console.error("SAVE QUESTION ERROR:", err);
+    setCors(res);
+    return res.status(500).json({
+      error: "Internal server error",
+      detail: err.message
+    });
+  }
 }
