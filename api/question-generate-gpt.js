@@ -21,9 +21,7 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing title or context" });
   }
 
-  const client = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  });
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
   const prompt = `
 Generate EXACTLY this JSON:
@@ -41,41 +39,80 @@ RULES:
 - 3 answers only
 - 1 correct answer only
 - Keep it factual
-- NO extra text before or after JSON
+- NO additional text outside the JSON
 
 TITLE: ${title}
 TEXT:
-${context.slice(0, 12000)}
+${context.slice(0, 14000)}
 `;
 
-  try {
-    // gpt-4.1-mini must use "input", WITHOUT text.format
-    const response = await client.responses.create({
+  /* --------------------------------------------
+     TRY 1 — GPT 4.1 MINI
+  -------------------------------------------- */
+  async function try41mini() {
+    const resp = await client.responses.create({
       model: "gpt-4.1-mini",
       input: prompt
     });
+    return resp.output_text;
+  }
 
-    const raw = response.output_text;
+  /* --------------------------------------------
+     TRY 2 — GPT 4O MINI (fallback)
+  -------------------------------------------- */
+  async function try4omini() {
+    const resp = await client.responses.create({
+      model: "gpt-4o-mini",
+      input: prompt
+    });
+    return resp.output_text;
+  }
 
-    let data;
+  let raw = null;
+  let sourceModel = null;
+
+  /* --------------------------------------------
+     RUN primary model
+  -------------------------------------------- */
+  try {
+    raw = await try41mini();
+    sourceModel = "gpt-4.1-mini";
+  } catch (err) {
+    console.error("Primary model FAILED → fallback:", err);
+  }
+
+  /* --------------------------------------------
+     FALLBACK if JSON parse fails or empty
+  -------------------------------------------- */
+  let parsed = null;
+
+  if (raw) {
     try {
-      data = JSON.parse(raw);
+      parsed = JSON.parse(raw);
+    } catch (_) {
+      parsed = null;
+    }
+  }
+
+  if (!parsed) {
+    try {
+      raw = await try4omini();
+      sourceModel = "gpt-4o-mini";
+      parsed = JSON.parse(raw);
     } catch (err) {
       return res.status(500).json({
-        error: "Model did not return valid JSON",
+        error: "Both models failed",
+        primary_fail: "gpt-4.1-mini invalid JSON",
+        fallback_fail: err?.message,
         raw
       });
     }
-
-    data.model = "gpt-4.1-mini";
-
-    return res.status(200).json(data);
-
-  } catch (err) {
-    console.error("GPT ERROR:", err);
-    return res.status(500).json({
-      error: "SERVER_ERROR",
-      detail: err?.message || String(err)
-    });
   }
+
+  /* --------------------------------------------
+     OK → return standard structure
+  -------------------------------------------- */
+  parsed.model = sourceModel;
+
+  return res.status(200).json(parsed);
 }
