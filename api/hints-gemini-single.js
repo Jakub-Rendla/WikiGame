@@ -1,82 +1,73 @@
 // api/hints-gemini-single.js
-// Gemini Flash-Lite single question generator
-// - title-aware
-// - numeric filter
-// - answer-in-question filter
-// - random slice
-// - strict JSON
-// - robust JSON extract
+// Gemini Flash Lite — FINAL STABLE VERSION
+// - few-shots (2 GOOD + 1 BAD)
+// - softened validation
+// - robust JSON extraction
+// - strict JSON output
+// - stable prompt
 
 export const config = { runtime: "nodejs" };
 
-function setCors(res, origin = "*") {
-  res.setHeader("Access-Control-Allow-Origin", origin || "*");
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+/* -------------------------------------------------------------
+   CORS
+------------------------------------------------------------- */
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "*");
+  res.setHeader("Access-Control-Allow-Headers", "*");
 }
 
 /* -------------------------------------------------------------
    Helpers
 ------------------------------------------------------------- */
 function extractNumber(str) {
-  const m = str.match(/-?\d+(?:[\.,]\d+)?/);
+  const m = str.match(/-?\d+(?:[.,]\d+)?/);
   return m ? parseFloat(m[0].replace(",", ".")) : null;
 }
 
 function validateTitleFilter(answer, title) {
   if (!title || title.trim().length < 3) return true;
-
-  const a = answer.toLowerCase().trim();
-  const t = title.toLowerCase().trim();
+  const a = answer.toLowerCase();
+  const t = title.toLowerCase();
 
   if (a === t) return false;
 
   const titleWords = t.split(/\s+/).filter(w => w.length >= 3);
   const ansWords = a.split(/\s+/);
 
-  if (!titleWords.length) return true;
-
   let overlap = 0;
   for (const tw of titleWords) {
-    for (const aw of ansWords) {
-      if (aw === tw) overlap++;
-    }
+    if (ansWords.includes(tw)) overlap++;
   }
 
-  return overlap < Math.ceil(titleWords.length * 0.5);
+  return overlap < Math.ceil(titleWords.length * 0.3);
 }
 
 function validateAnswers(obj, title) {
   if (!obj || !Array.isArray(obj.answers)) return false;
 
-  const qLower = obj.question.toLowerCase();
+  const q = obj.question.toLowerCase();
 
-  // answer-in-question filter
   for (const ans of obj.answers) {
     const a = ans.toLowerCase().trim();
-    if (a.length >= 3 && qLower.includes(a)) return false;
-  }
-
-  // title filter
-  for (const ans of obj.answers) {
+    if (a.length >= 3 && q.includes(a)) return false;
     if (!validateTitleFilter(ans, title)) return false;
   }
 
-  // numeric
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
 
   if (correct !== null) {
     for (let i = 0; i < nums.length; i++) {
       if (i === obj.correctIndex) continue;
+
       const fake = nums[i];
       if (fake === null) continue;
 
       const diff = Math.abs(fake - correct);
       const rel = diff / Math.max(1, Math.abs(correct));
 
-      if (diff < 10 || rel < 0.10) return false;
+      if (diff < 5 || rel < 0.05) return false;
     }
   }
 
@@ -84,45 +75,62 @@ function validateAnswers(obj, title) {
 }
 
 /* -------------------------------------------------------------
-   Prompt
+   Prompt (SAFE FEW SHOTS)
 ------------------------------------------------------------- */
-function strictJSONPrompt(lang, title) {
+function buildGeminiPrompt(lang, title) {
   return `
-Vygeneruj přesně 1 otázku jako JSON:
+Vygeneruj přesně 1 otázku jako STRICT JSON:
 
 {
   "question": "...",
   "answers": ["A","B","C"],
-  "correctIndex": 1
+  "correctIndex": 0
 }
 
+GOOD PŘÍKLADY:
+1)
+{
+  "question": "Jaký byl hlavní cíl reformy popsané v textu?",
+  "answers": ["Zlepšit správu provincie","Snížit obchod","Zavést nové daně"],
+  "correctIndex": 0
+}
+
+2)
+{
+  "question": "Kdo inicioval změnu zmíněnou v textu?",
+  "answers": ["Marcus Livius","Varro Atticus","Publius Marus"],
+  "correctIndex": 0
+}
+
+BAD PŘÍKLAD (nepoužívat):
+"Co článek uvádí o X?"
+
 PRAVIDLA:
-- Otázka nesmí obsahovat správnou odpověď.
-- Správná odpověď nesmí být přesně název článku: "${title}".
-- Žádná odpověď nesmí obsahovat název článku nebo být příliš podobná.
-- Pokud je odpověď číslo, falešné hodnoty musí být hodně odlišné.
-- Bez markdownu.
+- Nepoužívej reference na článek („v textu“, „článek říká“).
+- Používej pouze fakta z textu.
+- Správná odpověď nesmí být stejná jako název článku: "${title}".
+- Preferuj: příčiny, role, důsledky.
 - Jazyk: ${lang}
+- Pouze JSON.
 `.trim();
 }
 
 /* -------------------------------------------------------------
-   Random slice
+   Slice
 ------------------------------------------------------------- */
-function pickSlice(full) {
-  const len = full.length;
-  if (len < 3500) return full;
+function pickSlice(text) {
+  if (text.length < 3500) return text;
 
-  if (Math.random() < 0.5) return full;
+  if (Math.random() < 0.5) return text;
 
   const sliceLen = 3000 + Math.floor(Math.random() * 600);
-  const maxStart = Math.max(0, len - sliceLen);
+  const maxStart = Math.max(0, text.length - sliceLen);
   const start = Math.floor(Math.random() * maxStart);
-  return full.slice(start, start + sliceLen);
+  return text.slice(start, start + sliceLen);
 }
 
 /* -------------------------------------------------------------
-   JSON cleanup
+   Extract clean JSON
 ------------------------------------------------------------- */
 function extractJSON(text) {
   let cleaned = text
@@ -138,74 +146,58 @@ function extractJSON(text) {
    Handler
 ------------------------------------------------------------- */
 export default async function handler(req, res) {
-  try {
-    const origin = req.headers?.origin || "*";
+  setCors(res);
 
-    if (req.method === "OPTIONS") {
-      setCors(res, origin);
-      return res.status(204).end();
-    }
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "POST")
+    return res.status(200).json({ ok: true, info: "Use POST" });
 
-    if (req.method !== "POST") {
-      setCors(res, origin);
-      return res.status(200).json({ ok: true, info: "Use POST" });
-    }
+  const apiKey = process.env.GOOGLE_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: "Missing GOOGLE_API_KEY" });
 
-    setCors(res, origin);
+  let body = req.body;
+  if (typeof body === "string") try { body = JSON.parse(body); } catch {}
 
-    const apiKey = process.env.GOOGLE_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "Missing GOOGLE_API_KEY" });
+  const { context = "", lang = "cs", title = "" } = body || {};
+  if (!context) return res.status(400).json({ error: "Missing context" });
 
-    let body = req.body;
-    if (typeof body === "string") try { body = JSON.parse(body); } catch {}
+  const chosen = pickSlice(context);
+  const system = buildGeminiPrompt(lang, title);
+  const user = `Zde je text:\n"""${chosen}"""\nVrať pouze JSON.`;
 
-    const { context = "", lang = "cs", title = "" } = body;
-    if (!context) return res.status(400).json({ error: "Missing context" });
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
 
-    const chosen = pickSlice(context);
-    const system = strictJSONPrompt(lang, title);
-    const user = `Zde je text článku:\n"""${chosen}"""\nVrať pouze JSON.`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [
+        { role: "user", parts: [{ text: system }] },
+        { role: "user", parts: [{ text: user }] }
+      ],
+      generationConfig: { temperature: 0.65, maxOutputTokens: 200 }
+    })
+  });
 
-    const url =
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
+  const data = await r.json().catch(() => null);
+  if (!data)
+    return res.status(500).json({ error: "Invalid Gemini response" });
 
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          { role: "user", parts: [{ text: system }] },
-          { role: "user", parts: [{ text: user }] }
-        ],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 200
-        }
-      })
-    });
+  let txt =
+    data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
 
-    const data = await r.json().catch(() => null);
-    if (!data) return res.status(500).json({ error: "Invalid Gemini response" });
+  const jsonString = extractJSON(txt);
 
-    let text =
-      data?.candidates?.[0]?.content?.parts
-        ?.map(p => p.text)
-        .join("")
-        ?.trim() || "";
-
-    text = extractJSON(text);
-
-    let obj;
-    try { obj = JSON.parse(text); }
-    catch { return res.status(500).json({ error: "Invalid JSON", rawText: text }); }
-
-    if (!validateAnswers(obj, title)) {
-      return res.status(500).json({ error: "Answer validation failed", obj });
-    }
-
-    return res.status(200).json(obj);
-
-  } catch (e) {
-    return res.status(500).json({ error: "Internal error", details: e.toString() });
+  let obj;
+  try { obj = JSON.parse(jsonString); }
+  catch {
+    return res.status(500).json({ error: "Invalid JSON", rawText: jsonString });
   }
+
+  if (!validateAnswers(obj, title)) {
+    return res.status(500).json({ error: "Answer validation failed", obj });
+  }
+
+  return res.status(200).json(obj);
 }
