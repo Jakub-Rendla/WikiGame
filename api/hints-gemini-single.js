@@ -1,27 +1,14 @@
 // api/hints-gemini-single.js
-// Gemini Flash-Lite single question generator (improved with 3 GOOD + 3 BAD few-shot)
-// - title-aware
-// - numeric filter
-// - answer-in-question filter
-// - robust JSON extract
-// - strict JSON output
-// - anti-meta / anti-hallucination
-// - 3 GOOD + 3 BAD few-shot
+// Gemini Flash-Lite — EDGE RUNTIME VERSION
+// strict JSON, 3 GOOD + 3 BAD few-shot, anti-meta, full validation
 
-export const config = { runtime: "nodejs" };
-
-function setCors(res, origin = "*") {
-  res.setHeader("Access-Control-Allow-Origin", origin || "*");
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-}
+export const config = { runtime: "edge" };
 
 /* -------------------------------------------------------------
    Helpers
 ------------------------------------------------------------- */
 function extractNumber(str) {
-  const m = str.match(/-?\d+(?:[\.,]\d+)?/);
+  const m = str.match(/-?\d+(?:[.,]\d+)?/);
   return m ? parseFloat(m[0].replace(",", ".")) : null;
 }
 
@@ -38,9 +25,7 @@ function validateTitleFilter(answer, title) {
 
   let overlap = 0;
   for (const tw of titleWords) {
-    for (const aw of ansWords) {
-      if (aw === tw) overlap++;
-    }
+    if (ansWords.includes(tw)) overlap++;
   }
 
   return overlap < Math.ceil(titleWords.length * 0.5);
@@ -49,14 +34,11 @@ function validateTitleFilter(answer, title) {
 function validateAnswers(obj, title) {
   if (!obj || !Array.isArray(obj.answers)) return false;
 
-  const qLower = obj.question.toLowerCase();
+  const q = obj.question.toLowerCase();
 
   for (const ans of obj.answers) {
-    const a = ans.toLowerCase().trim();
-    if (a.length >= 3 && qLower.includes(a)) return false;
-  }
-
-  for (const ans of obj.answers) {
+    const a = ans.toLowerCase();
+    if (a.length >= 3 && q.includes(a)) return false;
     if (!validateTitleFilter(ans, title)) return false;
   }
 
@@ -66,24 +48,25 @@ function validateAnswers(obj, title) {
   if (correct !== null) {
     for (let i = 0; i < nums.length; i++) {
       if (i === obj.correctIndex) continue;
+
       const fake = nums[i];
       if (fake === null) continue;
 
       const diff = Math.abs(fake - correct);
       const rel = diff / Math.max(1, Math.abs(correct));
-      if (diff < 10 || rel < 0.10) return false;
+
+      if (diff < 10 || rel < 0.1) return false;
     }
   }
-
   return true;
 }
 
 /* -------------------------------------------------------------
-   Gemini PROMPT (with 3 GOOD + 3 BAD few-shot)
+   Prompt (3 GOOD + 3 BAD)
 ------------------------------------------------------------- */
-function strictJSONPrompt(lang, title) {
+function buildGeminiPrompt(lang, title) {
   return `
-Vygeneruj přesně 1 kvízovou otázku jako JSON:
+Vygeneruj přesně 1 otázku jako STRICT JSON:
 
 {
   "question": "...",
@@ -137,43 +120,35 @@ BAD 3:
   "correctIndex": 1
 }   // extrakce — zakázáno
 
+
 ====================
 PRAVIDLA
 ====================
 
-- Použij POUZE informace výslovně uvedené v textu.
-- Neodkazuj na článek samotný ("v tomto článku", "text uvádí", "podle textu").
-- Otázka musí být samostatná, bez meta úvodů.
+- Použij POUZE fakta obsažená v textu.
+- Nikdy neodkazuj na článek samotný („v tomto článku“, „text uvádí“…).
 - Správná odpověď nesmí být totožná ani podobná názvu článku "${title}".
-- Žádná odpověď nesmí obsahovat název článku.
-- Pokud je odpověď číslo, falešné hodnoty musí být výrazně odlišné.
-- Nepřidávej nic, co v textu není (žádné vymyšlené roky, jména, fakta).
-- Neuváděj příliš obecné otázky, pouze konkrétní a faktické.
-- Odpovědi musí být typově homogenní.
-- Otázka nesmí obsahovat správnou odpověď uvnitř formulace.
-- Jen čistý JSON.
+- Žádné vymyšlené údaje.
+- Neuváděj příliš obecné otázky.
+- Preferuj: příčiny, důsledky, role, funkce, vztahy.
+- Odpovědi musí být stejného typu.
+- Otázka nesmí obsahovat správnou odpověď.
+- Pouze čistý JSON.
 - Jazyk: ${lang}
 `.trim();
 }
 
-/* -------------------------------------------------------------
-   Slice
-------------------------------------------------------------- */
-function pickSlice(full) {
-  const len = full.length;
-  if (len < 3500) return full;
+function pickSlice(txt) {
+  if (txt.length < 3500) return txt;
 
-  if (Math.random() < 0.5) return full;
+  if (Math.random() < 0.5) return txt;
 
   const sliceLen = 3000 + Math.floor(Math.random() * 600);
-  const maxStart = Math.max(0, len - sliceLen);
+  const maxStart = Math.max(0, txt.length - sliceLen);
   const start = Math.floor(Math.random() * maxStart);
-  return full.slice(start, start + sliceLen);
+  return txt.slice(start, start + sliceLen);
 }
 
-/* -------------------------------------------------------------
-   JSON cleanup
-------------------------------------------------------------- */
 function extractJSON(text) {
   let cleaned = text
     .replace(/```json/gi, "")
@@ -185,37 +160,27 @@ function extractJSON(text) {
 }
 
 /* -------------------------------------------------------------
-   Handler
+   Handler (EDGE)
 ------------------------------------------------------------- */
-export default async function handler(req, res) {
+export default async function handler(request) {
   try {
-    const origin = req.headers?.origin || "*";
+    const { context = "", lang = "cs", title = "" } = await request.json();
 
-    if (req.method === "OPTIONS") {
-      setCors(res, origin);
-      return res.status(204).end();
+    if (!context) {
+      return new Response(JSON.stringify({ error: "Missing context" }), {
+        status: 400
+      });
     }
-
-    if (req.method !== "POST") {
-      setCors(res, origin);
-      return res.status(200).json({ ok: true, info: "Use POST" });
-    }
-
-    setCors(res, origin);
 
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "Missing GEMINI_API_KEY" });
-
-    let body = req.body;
-    if (typeof body === "string") try { body = JSON.parse(body); } catch {}
-
-    const { context = "", lang = "cs", title = "" } = body;
-    if (!context) return res.status(400).json({ error: "Missing context" });
+    if (!apiKey)
+      return new Response(JSON.stringify({ error: "Missing GEMINI_API_KEY" }), {
+        status: 500
+      });
 
     const chosen = pickSlice(context);
-
-    const system = strictJSONPrompt(lang, title);
-    const user = `Zde je text článku:\n"""${chosen}"""\nVrať pouze JSON.`;
+    const system = buildGeminiPrompt(lang, title);
+    const user = `Zde je text článku:\n"""${chosen}"""\nVrať striktně JSON.`;
 
     const url =
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
@@ -236,27 +201,36 @@ export default async function handler(req, res) {
     });
 
     const data = await r.json();
-    if (!data) return res.status(500).json({ error: "Invalid Gemini response" });
+    let txt =
+      data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
 
-    let text =
-      data?.candidates?.[0]?.content?.parts
-        ?.map(p => p.text)
-        .join("")
-        ?.trim() || "";
-
-    text = extractJSON(text);
+    const jsonString = extractJSON(txt);
 
     let obj;
-    try { obj = JSON.parse(text); }
-    catch { return res.status(500).json({ error: "Invalid JSON", rawText: text }); }
-
-    if (!validateAnswers(obj, title)) {
-      return res.status(500).json({ error: "Answer validation failed", obj });
+    try {
+      obj = JSON.parse(jsonString);
+    } catch {
+      return new Response(
+        JSON.stringify({ error: "Invalid JSON", rawText: jsonString }),
+        { status: 500 }
+      );
     }
 
-    return res.status(200).json(obj);
+    if (!validateAnswers(obj, title)) {
+      return new Response(
+        JSON.stringify({ error: "Answer validation failed", obj }),
+        { status: 500 }
+      );
+    }
 
+    return new Response(JSON.stringify(obj), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
   } catch (e) {
-    return res.status(500).json({ error: "Internal error", details: e.toString() });
+    return new Response(
+      JSON.stringify({ error: "Internal error", details: e.toString() }),
+      { status: 500 }
+    );
   }
 }
