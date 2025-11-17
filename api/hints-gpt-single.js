@@ -1,5 +1,5 @@
 // api/hints-gpt-single.js
-// GPT-4o-mini single question generator — EDGE RUNTIME VERSION
+// GPT-4o-mini single question generator — EDGE RUNTIME + RETRY
 
 export const config = { runtime: "edge" };
 
@@ -47,6 +47,7 @@ function validateAnswers(obj, title) {
   if (correct !== null) {
     for (let i = 0; i < nums.length; i++) {
       if (i === obj.correctIndex) continue;
+
       const fake = nums[i];
       if (fake === null) continue;
 
@@ -60,7 +61,7 @@ function validateAnswers(obj, title) {
 }
 
 /* -------------------------------------------------------------
-   Prompt (with 3 GOOD + 3 BAD few-shot)
+   Prompt (with few-shot)
 ------------------------------------------------------------- */
 function buildPrompt(lang, title) {
   return `
@@ -102,36 +103,31 @@ BAD EXAMPLES
 ======================
 
 BAD 1:
-"Co podle tohoto článku autor tvrdí?"   // meta reference
+"Co podle tohoto článku autor tvrdí?" // meta reference
 
 BAD 2:
 {
   "question": "Jaký byl rok 1875?",
   "answers": ["1875","1876","1874"],
   "correctIndex": 0
-}   // answers too similar
+} // numbers too similar
 
 BAD 3:
 {
   "question": "Které tři věci článek zmiňuje?",
   "answers": ["...","...","..."],
   "correctIndex": 1
-}   // extraction question — forbidden
-
+} // extraction — forbidden
 
 ======================
 RULES
 ======================
 
-- Use ONLY explicit facts from the provided article.
-- NEVER reference the article itself (forbidden: "v tomto článku", "text uvádí", etc.).
-- No meta commentary.
-- Do NOT repeat the article title: "${title}".
-- Correct answer must NOT be similar to title.
-- No invented facts.
-- No universal trivia unless explicitly present.
-- Prefer deeper context: causes, roles, processes, functions.
-- Answers must be homogeneous type.
+- Use ONLY explicit facts from the article.
+- NEVER reference the article (“v tomto článku”, “text uvádí”, …).
+- Do NOT repeat or closely match the article title: "${title}".
+- Correct answer must be clearly distinct.
+- Prefer deeper context: causes, roles, processes.
 - Language: ${lang}
 `.trim();
 }
@@ -148,7 +144,39 @@ function pickSlice(txt) {
 }
 
 /* -------------------------------------------------------------
-   Handler (EDGE)
+   Core GPT request (single attempt)
+------------------------------------------------------------- */
+async function tryGenerateGPT(systemPrompt, userPrompt, apiKey) {
+  const r = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      input: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ],
+      temperature: 0.55,
+      max_output_tokens: 200
+    })
+  });
+
+  const raw = await r.json();
+  const text = raw?.output?.[0]?.content?.[0]?.text;
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/* -------------------------------------------------------------
+   Handler (EDGE) with retry
 ------------------------------------------------------------- */
 export default async function handler(request) {
   try {
@@ -166,53 +194,29 @@ export default async function handler(request) {
         status: 500
       });
 
-    const chosen = pickSlice(context);
-    const systemPrompt = buildPrompt(lang, title);
-    const userPrompt = `ARTICLE:\n"""${chosen}"""`;
+    // Retry loop (max 2 attempts)
+    let finalObj = null;
 
-    const r = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        input: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt }
-        ],
-        temperature: 0.55,
-        max_output_tokens: 200
-      })
-    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const chosen = pickSlice(context);
+      const system = buildPrompt(lang, title);
+      const user = `ARTICLE:\n"""${chosen}"""`;
 
-    const raw = await r.json();
+      const obj = await tryGenerateGPT(system, user, apiKey);
+      if (obj && validateAnswers(obj, title)) {
+        finalObj = obj;
+        break;
+      }
+    }
 
-    const text = raw?.output?.[0]?.content?.[0]?.text;
-    if (!text)
-      return new Response(JSON.stringify({ error: "Empty text", raw }), {
-        status: 500
-      });
-
-    let obj;
-    try {
-      obj = JSON.parse(text);
-    } catch {
+    if (!finalObj) {
       return new Response(
-        JSON.stringify({ error: "Invalid JSON", rawText: text }),
+        JSON.stringify({ error: "Answer validation failed (retry)" }),
         { status: 500 }
       );
     }
 
-    if (!validateAnswers(obj, title)) {
-      return new Response(
-        JSON.stringify({ error: "Answer validation failed", obj }),
-        { status: 500 }
-      );
-    }
-
-    return new Response(JSON.stringify(obj), {
+    return new Response(JSON.stringify(finalObj), {
       status: 200,
       headers: { "Content-Type": "application/json" }
     });
