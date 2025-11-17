@@ -1,7 +1,7 @@
 // api/hints-gemini-single.js
-// Gemini Flash-Lite — EDGE RUNTIME + RETRY
+// Gemini Flash-Lite — Node.js version + retry + few-shot
 
-export const config = { runtime: "edge" };
+export const config = { runtime: "nodejs" };
 
 /* -------------------------------------------------------------
    Helpers
@@ -61,7 +61,7 @@ function validateAnswers(obj, title) {
 }
 
 /* -------------------------------------------------------------
-   Prompt (few-shot)
+   Prompt
 ------------------------------------------------------------- */
 function buildGeminiPrompt(lang, title) {
   return `
@@ -110,15 +110,17 @@ BAD 3: {"question":"Jaké tři věci článek uvádí?","answers":["...","...","
 PRAVIDLA
 ====================
 
-- Nepoužívej meta reference („text uvádí“, „článek říká“).
-- Odpověď nesmí být totožná ani podobná názvu článku "${title}".
+- Nepoužívej meta reference („v článku“, „text uvádí“…).
+- Odpověď nesmí být podobná názvu článku "${title}".
 - Žádné vymyšlené údaje.
 - Preferuj příčiny, následky, role, funkce.
-- Odpovědi stejného typu.
 - Jazyk: ${lang}
 `.trim();
 }
 
+/* -------------------------------------------------------------
+   Slice
+------------------------------------------------------------- */
 function pickSlice(txt) {
   if (txt.length < 3500) return txt;
 
@@ -130,30 +132,20 @@ function pickSlice(txt) {
   return txt.slice(start, start + sliceLen);
 }
 
-function extractJSON(text) {
-  let cleaned = text
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
-    .trim();
-
-  const match = cleaned.match(/\{[\s\S]*\}/);
-  return match ? match[0] : cleaned;
-}
-
 /* -------------------------------------------------------------
-   Core Gemini request (single attempt)
+   Single Gemini call
 ------------------------------------------------------------- */
-async function tryGenerateGemini(system, user, apiKey) {
+async function tryGemini(apiKey, systemPrompt, userPrompt) {
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
 
-  const r = await fetch(url, {
+  const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [
-        { role: "user", parts: [{ text: system }] },
-        { role: "user", parts: [{ text: user }] }
+        { role: "user", parts: [{ text: systemPrompt }] },
+        { role: "user", parts: [{ text: userPrompt }] }
       ],
       generationConfig: {
         temperature: 0.65,
@@ -162,67 +154,80 @@ async function tryGenerateGemini(system, user, apiKey) {
     })
   });
 
-  const data = await r.json();
+  const data = await response.json().catch(() => null);
   const txt =
     data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
 
-  const jsonString = extractJSON(txt);
   try {
-    return JSON.parse(jsonString);
+    const match = txt.match(/\{[\s\S]*\}/);
+    return match ? JSON.parse(match[0]) : null;
   } catch {
     return null;
   }
 }
 
 /* -------------------------------------------------------------
-   Handler (EDGE) with retry
+   Node handler with retry
 ------------------------------------------------------------- */
-export default async function handler(request) {
+export default async function handler(req, res) {
   try {
-    const { context = "", lang = "cs", title = "" } = await request.json();
+    // CORS
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "*");
 
-    if (!context) {
-      return new Response(JSON.stringify({ error: "Missing context" }), {
-        status: 400
-      });
+    if (req.method === "OPTIONS") return res.status(204).end();
+    if (req.method !== "POST")
+      return res.status(200).json({ ok: true, info: "Use POST" });
+
+    // Parse body
+    let body = req.body;
+    if (!body || typeof body !== "object") {
+      try {
+        body = JSON.parse(await getRawBody(req));
+      } catch {
+        return res.status(400).json({ error: "Invalid JSON body" });
+      }
     }
 
+    const { context = "", lang = "cs", title = "" } = body;
+    if (!context) return res.status(400).json({ error: "Missing context" });
+
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey)
-      return new Response(JSON.stringify({ error: "Missing GEMINI_API_KEY" }), {
-        status: 500
-      });
+    if (!apiKey) return res.status(500).json({ error: "Missing GEMINI_API_KEY" });
 
-    let finalObj = null;
+    let final = null;
 
-    for (let attempt = 0; attempt < 2; attempt++) {
+    // Retry loop
+    for (let i = 0; i < 2; i++) {
       const chosen = pickSlice(context);
       const system = buildGeminiPrompt(lang, title);
       const user = `Zde je text článku:\n"""${chosen}"""\nVrať striktně JSON.`;
 
-      const obj = await tryGenerateGemini(system, user, apiKey);
+      const obj = await tryGemini(apiKey, system, user);
 
       if (obj && validateAnswers(obj, title)) {
-        finalObj = obj;
+        final = obj;
         break;
       }
     }
 
-    if (!finalObj) {
-      return new Response(
-        JSON.stringify({ error: "Answer validation failed (retry)" }),
-        { status: 500 }
-      );
-    }
+    if (!final)
+      return res.status(500).json({ error: "Answer validation failed (retry)" });
 
-    return new Response(JSON.stringify(finalObj), {
-      status: 200,
-      headers: { "Content-Type": "application/json" }
-    });
+    return res.status(200).json(final);
   } catch (e) {
-    return new Response(
-      JSON.stringify({ error: "Internal error", details: e.toString() }),
-      { status: 500 }
-    );
+    return res.status(500).json({ error: "Internal error", details: e.toString() });
   }
+}
+
+/* -------------------------------------------------------------
+   Raw body helper for Node
+------------------------------------------------------------- */
+function getRawBody(req) {
+  return new Promise(resolve => {
+    let data = "";
+    req.on("data", chunk => (data += chunk));
+    req.on("end", () => resolve(data));
+  });
 }
