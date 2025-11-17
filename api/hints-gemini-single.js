@@ -1,13 +1,26 @@
 // api/hints-gemini-single.js
-// Gemini Flash-Lite — Node.js version + retry + few-shot
+// Gemini Flash-Lite single question generator
+// - title-aware
+// - numeric filter
+// - answer-in-question filter
+// - random slice
+// - strict JSON
+// - robust JSON extract
 
 export const config = { runtime: "nodejs" };
+
+function setCors(res, origin = "*") {
+  res.setHeader("Access-Control-Allow-Origin", origin || "*");
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
 
 /* -------------------------------------------------------------
    Helpers
 ------------------------------------------------------------- */
 function extractNumber(str) {
-  const m = str.match(/-?\d+(?:[.,]\d+)?/);
+  const m = str.match(/-?\d+(?:[\.,]\d+)?/);
   return m ? parseFloat(m[0].replace(",", ".")) : null;
 }
 
@@ -22,9 +35,13 @@ function validateTitleFilter(answer, title) {
   const titleWords = t.split(/\s+/).filter(w => w.length >= 3);
   const ansWords = a.split(/\s+/);
 
+  if (!titleWords.length) return true;
+
   let overlap = 0;
   for (const tw of titleWords) {
-    if (ansWords.includes(tw)) overlap++;
+    for (const aw of ansWords) {
+      if (aw === tw) overlap++;
+    }
   }
 
   return overlap < Math.ceil(titleWords.length * 0.5);
@@ -33,39 +50,45 @@ function validateTitleFilter(answer, title) {
 function validateAnswers(obj, title) {
   if (!obj || !Array.isArray(obj.answers)) return false;
 
-  const q = obj.question.toLowerCase();
+  const qLower = obj.question.toLowerCase();
 
+  // answer-in-question filter
   for (const ans of obj.answers) {
-    const a = ans.toLowerCase();
-    if (a.length >= 3 && q.includes(a)) return false;
+    const a = ans.toLowerCase().trim();
+    if (a.length >= 3 && qLower.includes(a)) return false;
+  }
+
+  // title filter
+  for (const ans of obj.answers) {
     if (!validateTitleFilter(ans, title)) return false;
   }
 
+  // numeric
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
 
   if (correct !== null) {
     for (let i = 0; i < nums.length; i++) {
       if (i === obj.correctIndex) continue;
-
       const fake = nums[i];
       if (fake === null) continue;
 
       const diff = Math.abs(fake - correct);
       const rel = diff / Math.max(1, Math.abs(correct));
 
-      if (diff < 10 || rel < 0.1) return false;
+      if (diff < 10 || rel < 0.10) return false;
     }
   }
+
   return true;
 }
 
 /* -------------------------------------------------------------
    Prompt
 ------------------------------------------------------------- */
-function buildGeminiPrompt(lang, title) {
+function strictJSONPrompt(lang, title) {
   return `
-Vygeneruj přesně 1 otázku jako STRICT JSON:
+Vygeneruj přesně 1 otázku jako JSON:
 
 {
   "question": "...",
@@ -73,161 +96,116 @@ Vygeneruj přesně 1 otázku jako STRICT JSON:
   "correctIndex": 1
 }
 
-====================
-GOOD
-====================
-
-GOOD 1:
-{
-  "question": "Jaký účel plnil hlavní most popsaný v textu?",
-  "answers": ["Propojoval obchodní čtvrti","Sloužil jako pevnost","Sběr daní"],
-  "correctIndex": 0
-}
-
-GOOD 2:
-{
-  "question": "Kdo inicioval reformu uvedenou v textu?",
-  "answers": ["Marcus Livius","Claudius Varro","Publius Metellus"],
-  "correctIndex": 0
-}
-
-GOOD 3:
-{
-  "question": "Co bylo bezprostředním důsledkem popsané události?",
-  "answers": ["Změna hranic provincie","Kolaps přístavu","Uzavření obchodní trasy"],
-  "correctIndex": 0
-}
-
-====================
-BAD
-====================
-
-BAD 1: "Co podle tohoto článku text říká?"
-BAD 2: {"question":"Kolik měřil rok 1875?","answers":["1875","1876","1874"],"correctIndex":1}
-BAD 3: {"question":"Jaké tři věci článek uvádí?","answers":["...","...","..."],"correctIndex":1}
-
-====================
-PRAVIDLA
-====================
-
-- Nepoužívej meta reference („v článku“, „text uvádí“…).
-- Odpověď nesmí být podobná názvu článku "${title}".
-- Žádné vymyšlené údaje.
-- Preferuj příčiny, následky, role, funkce.
+PRAVIDLA:
+- Otázka nesmí obsahovat správnou odpověď.
+- Správná odpověď nesmí být přesně název článku: "${title}".
+- Žádná odpověď nesmí obsahovat název článku nebo být příliš podobná.
+- Pokud je odpověď číslo, falešné hodnoty musí být hodně odlišné.
+- Bez markdownu.
 - Jazyk: ${lang}
 `.trim();
 }
 
 /* -------------------------------------------------------------
-   Slice
+   Random slice
 ------------------------------------------------------------- */
-function pickSlice(txt) {
-  if (txt.length < 3500) return txt;
+function pickSlice(full) {
+  const len = full.length;
+  if (len < 3500) return full;
 
-  if (Math.random() < 0.5) return txt;
+  if (Math.random() < 0.5) return full;
 
   const sliceLen = 3000 + Math.floor(Math.random() * 600);
-  const maxStart = Math.max(0, txt.length - sliceLen);
+  const maxStart = Math.max(0, len - sliceLen);
   const start = Math.floor(Math.random() * maxStart);
-  return txt.slice(start, start + sliceLen);
+  return full.slice(start, start + sliceLen);
 }
 
 /* -------------------------------------------------------------
-   Single Gemini call
+   JSON cleanup
 ------------------------------------------------------------- */
-async function tryGemini(apiKey, systemPrompt, userPrompt) {
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
+function extractJSON(text) {
+  let cleaned = text
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [
-        { role: "user", parts: [{ text: systemPrompt }] },
-        { role: "user", parts: [{ text: userPrompt }] }
-      ],
-      generationConfig: {
-        temperature: 0.65,
-        maxOutputTokens: 200
-      }
-    })
-  });
-
-  const data = await response.json().catch(() => null);
-  const txt =
-    data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
-
-  try {
-    const match = txt.match(/\{[\s\S]*\}/);
-    return match ? JSON.parse(match[0]) : null;
-  } catch {
-    return null;
-  }
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  return match ? match[0] : cleaned;
 }
 
 /* -------------------------------------------------------------
-   Node handler with retry
+   Handler
 ------------------------------------------------------------- */
 export default async function handler(req, res) {
   try {
-    // CORS
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "*");
+    const origin = req.headers?.origin || "*";
 
-    if (req.method === "OPTIONS") return res.status(204).end();
-    if (req.method !== "POST")
-      return res.status(200).json({ ok: true, info: "Use POST" });
-
-    // Parse body
-    let body = req.body;
-    if (!body || typeof body !== "object") {
-      try {
-        body = JSON.parse(await getRawBody(req));
-      } catch {
-        return res.status(400).json({ error: "Invalid JSON body" });
-      }
+    if (req.method === "OPTIONS") {
+      setCors(res, origin);
+      return res.status(204).end();
     }
+
+    if (req.method !== "POST") {
+      setCors(res, origin);
+      return res.status(200).json({ ok: true, info: "Use POST" });
+    }
+
+    setCors(res, origin);
+
+    const apiKey = process.env.GOOGLE_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "Missing GOOGLE_API_KEY" });
+
+    let body = req.body;
+    if (typeof body === "string") try { body = JSON.parse(body); } catch {}
 
     const { context = "", lang = "cs", title = "" } = body;
     if (!context) return res.status(400).json({ error: "Missing context" });
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "Missing GEMINI_API_KEY" });
+    const chosen = pickSlice(context);
+    const system = strictJSONPrompt(lang, title);
+    const user = `Zde je text článku:\n"""${chosen}"""\nVrať pouze JSON.`;
 
-    let final = null;
+    const url =
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
 
-    // Retry loop
-    for (let i = 0; i < 2; i++) {
-      const chosen = pickSlice(context);
-      const system = buildGeminiPrompt(lang, title);
-      const user = `Zde je text článku:\n"""${chosen}"""\nVrať striktně JSON.`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          { role: "user", parts: [{ text: system }] },
+          { role: "user", parts: [{ text: user }] }
+        ],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 200
+        }
+      })
+    });
 
-      const obj = await tryGemini(apiKey, system, user);
+    const data = await r.json().catch(() => null);
+    if (!data) return res.status(500).json({ error: "Invalid Gemini response" });
 
-      if (obj && validateAnswers(obj, title)) {
-        final = obj;
-        break;
-      }
+    let text =
+      data?.candidates?.[0]?.content?.parts
+        ?.map(p => p.text)
+        .join("")
+        ?.trim() || "";
+
+    text = extractJSON(text);
+
+    let obj;
+    try { obj = JSON.parse(text); }
+    catch { return res.status(500).json({ error: "Invalid JSON", rawText: text }); }
+
+    if (!validateAnswers(obj, title)) {
+      return res.status(500).json({ error: "Answer validation failed", obj });
     }
 
-    if (!final)
-      return res.status(500).json({ error: "Answer validation failed (retry)" });
+    return res.status(200).json(obj);
 
-    return res.status(200).json(final);
   } catch (e) {
     return res.status(500).json({ error: "Internal error", details: e.toString() });
   }
-}
-
-/* -------------------------------------------------------------
-   Raw body helper for Node
-------------------------------------------------------------- */
-function getRawBody(req) {
-  return new Promise(resolve => {
-    let data = "";
-    req.on("data", chunk => (data += chunk));
-    req.on("end", () => resolve(data));
-  });
 }
