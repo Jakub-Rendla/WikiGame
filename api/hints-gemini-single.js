@@ -1,11 +1,12 @@
 // api/hints-gemini-single.js
-// Gemini Flash-Lite single question generator
+// Gemini Flash-Lite single question generator (improved with 3 GOOD + 3 BAD few-shot)
 // - title-aware
 // - numeric filter
 // - answer-in-question filter
-// - random slice
-// - strict JSON
 // - robust JSON extract
+// - strict JSON output
+// - anti-meta / anti-hallucination
+// - 3 GOOD + 3 BAD few-shot
 
 export const config = { runtime: "nodejs" };
 
@@ -35,8 +36,6 @@ function validateTitleFilter(answer, title) {
   const titleWords = t.split(/\s+/).filter(w => w.length >= 3);
   const ansWords = a.split(/\s+/);
 
-  if (!titleWords.length) return true;
-
   let overlap = 0;
   for (const tw of titleWords) {
     for (const aw of ansWords) {
@@ -52,18 +51,15 @@ function validateAnswers(obj, title) {
 
   const qLower = obj.question.toLowerCase();
 
-  // answer-in-question filter
   for (const ans of obj.answers) {
     const a = ans.toLowerCase().trim();
     if (a.length >= 3 && qLower.includes(a)) return false;
   }
 
-  // title filter
   for (const ans of obj.answers) {
     if (!validateTitleFilter(ans, title)) return false;
   }
 
-  // numeric
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
 
@@ -75,7 +71,6 @@ function validateAnswers(obj, title) {
 
       const diff = Math.abs(fake - correct);
       const rel = diff / Math.max(1, Math.abs(correct));
-
       if (diff < 10 || rel < 0.10) return false;
     }
   }
@@ -84,11 +79,11 @@ function validateAnswers(obj, title) {
 }
 
 /* -------------------------------------------------------------
-   Prompt
+   Gemini PROMPT (with 3 GOOD + 3 BAD few-shot)
 ------------------------------------------------------------- */
 function strictJSONPrompt(lang, title) {
   return `
-Vygeneruj přesně 1 otázku jako JSON:
+Vygeneruj přesně 1 kvízovou otázku jako JSON:
 
 {
   "question": "...",
@@ -96,18 +91,73 @@ Vygeneruj přesně 1 otázku jako JSON:
   "correctIndex": 1
 }
 
-PRAVIDLA:
-- Otázka nesmí obsahovat správnou odpověď.
-- Správná odpověď nesmí být přesně název článku: "${title}".
-- Žádná odpověď nesmí obsahovat název článku nebo být příliš podobná.
-- Pokud je odpověď číslo, falešné hodnoty musí být hodně odlišné.
-- Bez markdownu.
+====================
+GOOD PŘÍKLADY
+====================
+
+GOOD 1:
+{
+  "question": "Jaký účel plnil hlavní most popsaný v textu?",
+  "answers": ["Propojoval obchodní čtvrti","Sloužil jako pevnost","Sběr daní"],
+  "correctIndex": 0
+}
+
+GOOD 2:
+{
+  "question": "Kdo inicioval reformu uvedenou v textu?",
+  "answers": ["Marcus Livius","Claudius Varro","Publius Metellus"],
+  "correctIndex": 0
+}
+
+GOOD 3:
+{
+  "question": "Co bylo bezprostředním důsledkem popsané události?",
+  "answers": ["Změna hranic provincie","Kolaps přístavu","Uzavření obchodní trasy"],
+  "correctIndex": 0
+}
+
+====================
+BAD PŘÍKLADY
+====================
+
+BAD 1:
+"Co podle tohoto článku text říká?"   // meta — zakázáno
+
+BAD 2:
+{
+  "question": "Kolik měřil rok 1875?",
+  "answers": ["1875","1876","1874"],
+  "correctIndex": 1
+}   // odpovědi příliš podobné
+
+BAD 3:
+{
+  "question": "Jaké tři věci článek uvádí?",
+  "answers": ["...","...","..."],
+  "correctIndex": 1
+}   // extrakce — zakázáno
+
+====================
+PRAVIDLA
+====================
+
+- Použij POUZE informace výslovně uvedené v textu.
+- Neodkazuj na článek samotný ("v tomto článku", "text uvádí", "podle textu").
+- Otázka musí být samostatná, bez meta úvodů.
+- Správná odpověď nesmí být totožná ani podobná názvu článku "${title}".
+- Žádná odpověď nesmí obsahovat název článku.
+- Pokud je odpověď číslo, falešné hodnoty musí být výrazně odlišné.
+- Nepřidávej nic, co v textu není (žádné vymyšlené roky, jména, fakta).
+- Neuváděj příliš obecné otázky, pouze konkrétní a faktické.
+- Odpovědi musí být typově homogenní.
+- Otázka nesmí obsahovat správnou odpověď uvnitř formulace.
+- Jen čistý JSON.
 - Jazyk: ${lang}
 `.trim();
 }
 
 /* -------------------------------------------------------------
-   Random slice
+   Slice
 ------------------------------------------------------------- */
 function pickSlice(full) {
   const len = full.length;
@@ -153,8 +203,8 @@ export default async function handler(req, res) {
 
     setCors(res, origin);
 
-    const apiKey = process.env.GOOGLE_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "Missing GOOGLE_API_KEY" });
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "Missing GEMINI_API_KEY" });
 
     let body = req.body;
     if (typeof body === "string") try { body = JSON.parse(body); } catch {}
@@ -163,6 +213,7 @@ export default async function handler(req, res) {
     if (!context) return res.status(400).json({ error: "Missing context" });
 
     const chosen = pickSlice(context);
+
     const system = strictJSONPrompt(lang, title);
     const user = `Zde je text článku:\n"""${chosen}"""\nVrať pouze JSON.`;
 
@@ -178,13 +229,13 @@ export default async function handler(req, res) {
           { role: "user", parts: [{ text: user }] }
         ],
         generationConfig: {
-          temperature: 0.7,
+          temperature: 0.65,
           maxOutputTokens: 200
         }
       })
     });
 
-    const data = await r.json().catch(() => null);
+    const data = await r.json();
     if (!data) return res.status(500).json({ error: "Invalid Gemini response" });
 
     let text =
