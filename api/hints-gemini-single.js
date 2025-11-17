@@ -6,6 +6,7 @@
 // - random slice
 // - strict JSON
 // - robust JSON extract
+// FIXED: Gemini 2.0 Flash Lite → MUST use one user message only
 
 export const config = { runtime: "nodejs" };
 
@@ -63,7 +64,7 @@ function validateAnswers(obj, title) {
     if (!validateTitleFilter(ans, title)) return false;
   }
 
-  // numeric
+  // numeric filter
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
 
@@ -169,13 +170,18 @@ export default async function handler(req, res) {
     const url =
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
 
+    // 🔥 KEY FIX: One user message combining system + user content
     const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [
-          { role: "user", parts: [{ text: system }] },
-          { role: "user", parts: [{ text: user }] }
+          {
+            role: "user",
+            parts: [
+              { text: system + "\n\n" + user }
+            ]
+          }
         ],
         generationConfig: {
           temperature: 0.7,
@@ -187,6 +193,7 @@ export default async function handler(req, res) {
     const data = await r.json().catch(() => null);
     if (!data) return res.status(500).json({ error: "Invalid Gemini response" });
 
+    // Extract text from parts
     let text =
       data?.candidates?.[0]?.content?.parts
         ?.map(p => p.text)
