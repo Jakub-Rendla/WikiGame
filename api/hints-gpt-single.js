@@ -1,7 +1,7 @@
 // api/hints-gpt-single.js
-// GPT-4o-mini single question generator — EDGE RUNTIME + RETRY
+// GPT-4o-mini — Node.js version + retry + few-shot
 
-export const config = { runtime: "edge" };
+export const config = { runtime: "nodejs" };
 
 /* -------------------------------------------------------------
    Helpers
@@ -35,19 +35,20 @@ function validateAnswers(obj, title) {
 
   const q = obj.question.toLowerCase();
 
+  // forbidden: answer contained in question
   for (const ans of obj.answers) {
     const a = ans.toLowerCase();
     if (a.length >= 3 && q.includes(a)) return false;
     if (!validateTitleFilter(ans, title)) return false;
   }
 
+  // numeric checks
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
 
   if (correct !== null) {
     for (let i = 0; i < nums.length; i++) {
       if (i === obj.correctIndex) continue;
-
       const fake = nums[i];
       if (fake === null) continue;
 
@@ -57,11 +58,12 @@ function validateAnswers(obj, title) {
       if (diff < 10 || rel < 0.1) return false;
     }
   }
+
   return true;
 }
 
 /* -------------------------------------------------------------
-   Prompt (with few-shot)
+   Prompt with few-shot
 ------------------------------------------------------------- */
 function buildPrompt(lang, title) {
   return `
@@ -103,35 +105,38 @@ BAD EXAMPLES
 ======================
 
 BAD 1:
-"Co podle tohoto článku autor tvrdí?" // meta reference
+"Co podle tohoto článku text uvádí?" // meta reference
 
 BAD 2:
 {
   "question": "Jaký byl rok 1875?",
   "answers": ["1875","1876","1874"],
   "correctIndex": 0
-} // numbers too similar
+}
 
 BAD 3:
 {
-  "question": "Které tři věci článek zmiňuje?",
+  "question": "Které tři věci článek popisuje?",
   "answers": ["...","...","..."],
   "correctIndex": 1
-} // extraction — forbidden
+}
 
 ======================
 RULES
 ======================
 
 - Use ONLY explicit facts from the article.
-- NEVER reference the article (“v tomto článku”, “text uvádí”, …).
-- Do NOT repeat or closely match the article title: "${title}".
-- Correct answer must be clearly distinct.
-- Prefer deeper context: causes, roles, processes.
+- STRICTLY forbid referencing the article (“v tomto článku”, “text říká”…).
+- Do NOT repeat or mimic the title: "${title}".
+- Avoid extraction questions.
+- Correct answer must be distinguishable.
 - Language: ${lang}
 `.trim();
 }
 
+/* -------------------------------------------------------------
+   Slice
+------------------------------------------------------------- */
 function pickSlice(txt) {
   if (txt.length < 3500) return txt;
 
@@ -144,10 +149,10 @@ function pickSlice(txt) {
 }
 
 /* -------------------------------------------------------------
-   Core GPT request (single attempt)
+   Single GPT call
 ------------------------------------------------------------- */
-async function tryGenerateGPT(systemPrompt, userPrompt, apiKey) {
-  const r = await fetch("https://api.openai.com/v1/responses", {
+async function tryGPT(apiKey, systemPrompt, userPrompt) {
+  const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -164,7 +169,7 @@ async function tryGenerateGPT(systemPrompt, userPrompt, apiKey) {
     })
   });
 
-  const raw = await r.json();
+  const raw = await response.json().catch(() => null);
   const text = raw?.output?.[0]?.content?.[0]?.text;
   if (!text) return null;
 
@@ -176,53 +181,70 @@ async function tryGenerateGPT(systemPrompt, userPrompt, apiKey) {
 }
 
 /* -------------------------------------------------------------
-   Handler (EDGE) with retry
+   Node handler with retry
 ------------------------------------------------------------- */
-export default async function handler(request) {
+export default async function handler(req, res) {
   try {
-    const { context = "", lang = "cs", title = "" } = await request.json();
+    // CORS
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "*");
 
-    if (!context) {
-      return new Response(JSON.stringify({ error: "Missing context" }), {
-        status: 400
-      });
+    if (req.method === "OPTIONS") {
+      return res.status(204).end();
     }
 
+    if (req.method !== "POST") {
+      return res.status(200).json({ ok: true, info: "Use POST" });
+    }
+
+    // Parse body
+    let body = req.body;
+    if (!body || typeof body !== "object") {
+      try {
+        body = JSON.parse(await getRawBody(req));
+      } catch {
+        return res.status(400).json({ error: "Invalid JSON body" });
+      }
+    }
+
+    const { context = "", lang = "cs", title = "" } = body;
+    if (!context) return res.status(400).json({ error: "Missing context" });
+
     const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey)
-      return new Response(JSON.stringify({ error: "Missing OPENAI_API_KEY" }), {
-        status: 500
-      });
+    if (!apiKey) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
 
-    // Retry loop (max 2 attempts)
-    let finalObj = null;
+    let final = null;
 
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let i = 0; i < 2; i++) {
       const chosen = pickSlice(context);
       const system = buildPrompt(lang, title);
       const user = `ARTICLE:\n"""${chosen}"""`;
 
-      const obj = await tryGenerateGPT(system, user, apiKey);
+      const obj = await tryGPT(apiKey, system, user);
       if (obj && validateAnswers(obj, title)) {
-        finalObj = obj;
+        final = obj;
         break;
       }
     }
 
-    if (!finalObj) {
-      return new Response(
-        JSON.stringify({ error: "Answer validation failed (retry)" }),
-        { status: 500 }
-      );
+    if (!final) {
+      return res.status(500).json({ error: "Answer validation failed (retry)" });
     }
 
-    return new Response(JSON.stringify(finalObj), {
-      status: 200,
-      headers: { "Content-Type": "application/json" }
-    });
+    return res.status(200).json(final);
   } catch (e) {
-    return new Response(JSON.stringify({ error: "Fatal", details: e.toString() }), {
-      status: 500
-    });
+    return res.status(500).json({ error: "Fatal", details: e.toString() });
   }
+}
+
+/* -------------------------------------------------------------
+   Node raw body helper
+------------------------------------------------------------- */
+function getRawBody(req) {
+  return new Promise(resolve => {
+    let data = "";
+    req.on("data", chunk => (data += chunk));
+    req.on("end", () => resolve(data));
+  });
 }
