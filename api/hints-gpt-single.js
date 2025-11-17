@@ -1,11 +1,12 @@
 // api/hints-gpt-single.js
-// GPT-4o-mini — FINAL STABLE VERSION
+// GPT-4o-mini — BALANCED VERSION
 // - nodejs runtime
-// - few-shot (2 GOOD + 1 BAD)
+// - 1 GOOD example
+// - 1 BAD example
 // - softened validation
-// - no meta references
+// - reference-avoid (soft rule)
+// - very stable for mini models
 // - strict JSON output
-// - minimal but safe restrictions
 
 export const config = { runtime: "nodejs" };
 
@@ -22,10 +23,11 @@ function setCors(res) {
    Helpers
 ------------------------------------------------------------- */
 function extractNumber(str) {
-  const m = str.match(/-?\d+(?:[.,]\d+)?/);
+  const m = str?.match?.(/-?\d+(?:[.,]\d+)?/);
   return m ? parseFloat(m[0].replace(",", ".")) : null;
 }
 
+/* Softer title alias rule */
 function validateTitleFilter(answer, title) {
   if (!title || title.trim().length < 3) return true;
 
@@ -41,37 +43,38 @@ function validateTitleFilter(answer, title) {
     if (ansWords.includes(tw)) overlap++;
   }
 
-  // Softer now: 30% not 50%
-  return overlap < Math.ceil(titleWords.length * 0.3);
+  // Balanced: 15 % threshold
+  return overlap < Math.ceil(titleWords.length * 0.15);
 }
 
+/* Softer, balanced validation */
 function validateAnswers(obj, title) {
-  if (!obj || !obj.answers || !Array.isArray(obj.answers)) return false;
+  if (!obj || !Array.isArray(obj.answers)) return false;
 
-  const q = obj.question.toLowerCase();
+  const qLower = obj.question.toLowerCase();
 
-  // answer inside question?
+  // NO answer inside question
   for (const ans of obj.answers) {
     const a = ans.toLowerCase().trim();
-    if (a.length >= 3 && q.includes(a)) return false;
+    if (a.length >= 3 && qLower.includes(a)) return false;
     if (!validateTitleFilter(ans, title)) return false;
   }
 
-  // numeric consistency (softer)
+  // Balanced numeric filter:
   const nums = obj.answers.map(extractNumber);
   const correct = nums[obj.correctIndex];
-
   if (correct !== null) {
     for (let i = 0; i < nums.length; i++) {
       if (i === obj.correctIndex) continue;
+
       const fake = nums[i];
       if (fake === null) continue;
 
       const diff = Math.abs(fake - correct);
       const rel = diff / Math.max(1, Math.abs(correct));
 
-      // Softer rule
-      if (diff < 5 || rel < 0.05) return false;
+      // Balanced thresholds:
+      if (diff < 3 && rel < 0.03) return false;
     }
   }
 
@@ -79,58 +82,48 @@ function validateAnswers(obj, title) {
 }
 
 /* -------------------------------------------------------------
-   Prompt with SAFE FEW-SHOTS
+   BALANCED PROMPT (short, stable)
 ------------------------------------------------------------- */
 function buildPrompt(lang, title) {
   return `
-Generate ONE quiz question in STRICT JSON format only.
+Generate ONE quiz question in STRICT JSON:
 
-FORMAT:
 {
   "question": "...",
-  "answers": ["A","B","C"],
+  "answers": ["A", "B", "C"],
   "correctIndex": 0
 }
 
-GOOD EXAMPLES:
-1)
+GOOD EXAMPLE:
 {
-  "question": "Který faktor nejvíce přispěl k růstu města?",
-  "answers": ["Rozvoj obchodu","Nedostatek vody","Zákaz těžby"],
-  "correctIndex": 0
-}
-
-2)
-{
-  "question": "Kdo vedl výpravu popsanou v textu?",
+  "question": "Kdo vedl expedici popsanou v textu?",
   "answers": ["John Hunt","Charles Baker","Arthur Davis"],
   "correctIndex": 0
 }
 
 BAD EXAMPLE (do not imitate):
-"Co tento článek uvádí o X?"
+"Co článek uvádí o X?"
 
 RULES:
-- Use ONLY explicit facts from the article.
-- DO NOT reference the article or text itself (no: "v článku", "text uvádí").
-- DO NOT use extraction questions.
-- Answer must NOT equal the article title: "${title}".
-- Keep answers same type.
-- No invented facts.
-- Output JSON ONLY.
+- Use ONLY facts from the provided text.
+- Avoid referencing the article directly (no “v článku”, “text uvádí”).
+- Avoid pure extraction questions.
+- Correct answer must NOT equal the article title: "${title}".
+- Prefer context-based: roles, causes, consequences, functions.
+- Answers must be of the same type.
 - Language: ${lang}
+- Output JSON only.
 `.trim();
 }
 
 /* -------------------------------------------------------------
-   Slice logic
+   Slice
 ------------------------------------------------------------- */
 function pickSlice(text) {
   if (text.length < 3500) return text;
-
   if (Math.random() < 0.5) return text;
 
-  const sliceLen = 3000 + Math.floor(Math.random() * 600);
+  const sliceLen = 3000 + Math.floor(Math.random() * 500);
   const maxStart = Math.max(0, text.length - sliceLen);
   const start = Math.floor(Math.random() * maxStart);
   return text.slice(start, start + sliceLen);
@@ -144,10 +137,11 @@ export default async function handler(req, res) {
 
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST")
-    return res.status(200).json({ ok: true, info: "Use POST" });
+    return res.status(200).json({ ok: true, info: "POST only" });
 
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+  if (!apiKey)
+    return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
 
   let body = req.body;
   if (typeof body === "string") try { body = JSON.parse(body); } catch {}
@@ -184,7 +178,9 @@ export default async function handler(req, res) {
 
   let obj;
   try { obj = JSON.parse(text); }
-  catch { return res.status(500).json({ error: "Invalid JSON", rawText: text }); }
+  catch {
+    return res.status(500).json({ error: "Invalid JSON", rawText: text });
+  }
 
   if (!validateAnswers(obj, title)) {
     return res.status(500).json({ error: "Answer validation failed", obj });
